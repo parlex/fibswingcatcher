@@ -480,7 +480,7 @@ per-token-overstyring. Ingen magiske tall i koden.
 | `slBufferPct` | 2 % | Under swingbunnen |
 | `minRR` | 3.0 | Minste akseptable RR |
 | `maxSetupAgeBars` | 48 | Levetid for oppsett og armering |
-| `minTradeSizeUsd` | 50 USD | Handler under dette ignoreres i bars og som trigger |
+| `minTradeSizeQuote` | 50 (quote-token) | Handler under dette ignoreres i bars og som trigger. USD-konvertering innføres med prisorakelet i plan 3. |
 
 ### Risiko
 
