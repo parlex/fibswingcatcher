@@ -49,12 +49,29 @@ describe('priceFromSqrtX96', () => {
     expect(p).toBeGreaterThan(0)
     expect(p).toBeLessThan(1e-9)
   })
+
+  it('inverterer prisen når baseIsToken0 er false', () => {
+    const flipped = { ...meta, baseIsToken0: false }
+    expect(priceFromSqrtX96(2n * Q96, flipped)).toBe('0.25')
+  })
+
+  it('inverterer og justerer desimaler samtidig når baseIsToken0 er false', () => {
+    const flipped = { ...meta, decimals0: 6, decimals1: 18, baseIsToken0: false }
+    expect(priceFromSqrtX96(2n * Q96, flipped)).toBe('250000000000')
+  })
+
+  it('returnerer "0" i stedet for å dele på null når den inverterte prisen ville vært 0', () => {
+    const flipped = { ...meta, baseIsToken0: false }
+    expect(priceFromSqrtX96(1n, flipped)).toBe('0')
+  })
 })
 
 describe('decodeSwapLog', () => {
   it('leser pris fra sqrtPriceX96, ikke fra mengdeforholdet', () => {
-    const trade = decodeSwapLog(makeLog(-100n, 400n, 2n * Q96), meta, 1_700_000)
-    expect(Number(trade.priceQuote)).toBeCloseTo(4, 9)
+    // Mengdeforholdet |250 / -100| = 2.5, men sqrtPrice sier 4 — de MÅ divergere,
+    // ellers beviser ikke testen at prisen faktisk kommer fra sqrtPriceX96.
+    const trade = decodeSwapLog(makeLog(-100n, 250n, 2n * Q96), meta, 1_700_000)
+    expect(trade.priceQuote).toBe('4')
   })
 
   it('merker et kjøp av base-tokenet som buy', () => {
