@@ -31,11 +31,13 @@ function harness(maxStalenessMs = 10_000) {
     onLog = l; onError = e; return unsubscribe
   })
 
+  const clearTimer = vi.fn((t: unknown) => { const i = timers.indexOf(t as never); if (i >= 0) timers.splice(i, 1) })
+
   const stream = new LiveStream({
     subscribe: subscribe as never,
     now: () => clock,
     setTimer: (fn: () => void, ms: number) => { const t = { fn, at: clock + ms }; timers.push(t); return t },
-    clearTimer: (t: unknown) => { const i = timers.indexOf(t as never); if (i >= 0) timers.splice(i, 1) },
+    clearTimer,
     maxStalenessMs,
     meta,
     blockTs: async () => 1_700_000_000,
@@ -43,7 +45,7 @@ function harness(maxStalenessMs = 10_000) {
   stream.on((e) => events.push(e))
 
   return {
-    stream, events, subscribe, unsubscribe,
+    stream, events, subscribe, unsubscribe, clearTimer, timers,
     emitLog: (i: number) => onLog?.(mkLog(i)),
     emitError: (e: Error) => onError?.(e),
     advance: (ms: number) => {
@@ -111,5 +113,37 @@ describe('LiveStream', () => {
     h.stream.start()
     h.emitLog(0); h.emitLog(0)
     await vi.waitFor(() => expect(h.events.filter((e) => e.kind === 'trade')).toHaveLength(1))
+  })
+
+  it('sender stale bare én gang per stale-episode, ikke én gang per varslingsvindu', () => {
+    const h = harness(10_000)
+    h.stream.start()
+    h.advance(10_001) // krysser terskelen første gang
+    h.advance(10_000) // fortsatt ingen event — samme episode
+    h.advance(10_000) // fortsatt ingen event — samme episode
+    h.advance(10_000) // fortsatt ingen event — samme episode
+    expect(h.events.filter((e) => e.kind === 'stale')).toHaveLength(1)
+  })
+
+  it('nullstiller stale-undertrykkelsen ved recovery, så en ny episode gir en ny stale-hendelse', async () => {
+    const h = harness(10_000)
+    h.stream.start()
+    h.advance(10_001)
+    h.emitLog(0)
+    await vi.waitFor(() => expect(h.events.some((e) => e.kind === 'healthy')).toBe(true))
+    h.advance(10_001) // ny episode etter recovery
+    expect(h.events.filter((e) => e.kind === 'stale')).toHaveLength(2)
+  })
+
+  it('fjerner et ventende reconnect-timer ved stop, ikke bare no-oper det', () => {
+    const h = harness()
+    h.stream.start()
+    h.emitError(new Error('socket lukket')) // planlegger et reconnect-forsøk
+    expect(h.timers.length).toBe(2) // stale-timer + ventende reconnect-timer
+    h.stream.stop()
+    expect(h.timers.length).toBe(0) // begge håndtak faktisk fjernet, ikke bare no-opet
+    expect(h.clearTimer).toHaveBeenCalledTimes(2)
+    h.advance(120_000)
+    expect(h.subscribe).toHaveBeenCalledOnce()
   })
 })

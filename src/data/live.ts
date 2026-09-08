@@ -25,7 +25,8 @@ const MAX_RECONNECT_MS = 30_000
 export class LiveStream {
   private listeners: ((e: StreamEvent) => void)[] = []
   private unsubscribe: (() => void) | undefined = undefined
-  private timer?: unknown
+  private staleTimer?: unknown
+  private reconnectTimer?: unknown
   private running = false
   private stale = false
   private lastEventAt = 0
@@ -49,8 +50,10 @@ export class LiveStream {
     this.running = false
     this.unsubscribe?.()
     this.unsubscribe = undefined
-    if (this.timer !== undefined) this.deps.clearTimer(this.timer)
-    this.timer = undefined
+    if (this.staleTimer !== undefined) this.deps.clearTimer(this.staleTimer)
+    this.staleTimer = undefined
+    if (this.reconnectTimer !== undefined) this.deps.clearTimer(this.reconnectTimer)
+    this.reconnectTimer = undefined
   }
 
   private emit(e: StreamEvent): void {
@@ -65,7 +68,10 @@ export class LiveStream {
         this.unsubscribe?.()
         this.unsubscribe = undefined
         if (!this.running) return
-        this.deps.setTimer(() => this.connect(), this.backoff)
+        this.reconnectTimer = this.deps.setTimer(() => {
+          this.reconnectTimer = undefined
+          this.connect()
+        }, this.backoff)
         this.backoff = Math.min(this.backoff * 2, MAX_RECONNECT_MS)
       },
     )
@@ -73,9 +79,9 @@ export class LiveStream {
 
   private armStaleTimer(): void {
     if (!this.running) return
-    this.timer = this.deps.setTimer(() => {
+    this.staleTimer = this.deps.setTimer(() => {
       const since = this.deps.now() - this.lastEventAt
-      if (since >= this.deps.maxStalenessMs) {
+      if (since >= this.deps.maxStalenessMs && !this.stale) {
         this.stale = true
         this.emit({ kind: 'stale', sinceMs: since })
       }
