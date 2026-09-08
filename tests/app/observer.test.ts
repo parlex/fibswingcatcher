@@ -117,6 +117,40 @@ describe('Observer', () => {
     expect(setups.allActive()).toEqual([])
   })
 
+  it('en replayet handel i sonen rører ikke tilstanden og varsler ikke', async () => {
+    const { obs, setups, notifier } = observer()
+    await feedImpulse(obs)
+    await obs.replay(trade(12 * H, 125))   // midt i sonen 120.26–129.26
+    expect(setups.allActive()[0]!.state).toBe('DETECTED')
+    expect(notifier.sent).toEqual([])
+  })
+
+  it('en levende handel i sonen etter replay gir TRIGGERED og et varsel', async () => {
+    const { obs, setups, notifier } = observer()
+    await feedImpulse(obs)
+    await obs.replay(trade(12 * H, 125))
+    await obs.onTrade(trade(12 * H + 1_000, 125))
+    expect(setups.allActive()[0]!.state).toBe('TRIGGERED')
+    expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
+  })
+
+  it('replay primer alertsSent uten å sende noe — og hindrer dobbeltvarsel etterpå', async () => {
+    const { obs, setups, notifier } = observer()
+    await feedImpulse(obs)
+    await obs.replay(trade(12 * H, 137))
+    expect(setups.allActive()[0]!.alertsSent).toEqual([0.5, 0.618])
+    expect(notifier.sent).toEqual([])
+    await obs.onTrade(trade(12 * H + 1_000, 137))
+    expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
+  })
+
+  it('replay bygger struktur — oppsettet oppstår av replayede handler alene', async () => {
+    const { obs, setups } = observer()
+    for (let i = 1; i <= 10; i++) await obs.replay(trade(i * H, 100 + i * 10))
+    await obs.replay(trade(11 * H, 195))
+    expect(setups.allActive()).toHaveLength(1)
+  })
+
   it('overlever omstart — oppsett og sendte varsler hentes fra basen', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)

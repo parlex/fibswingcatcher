@@ -29,8 +29,13 @@ npm start
 
 Miljøvariabler: `RPC_HTTP_URL` og `RPC_WS_URL` er påkrevd. `TELEGRAM_BOT_TOKEN`
 og `TELEGRAM_CHAT_ID` er valgfrie — uten dem går varslene ingen steder.
-`DB_PATH` (standard `data/fibswingcatcher.db`), `LOG_LEVEL` og `BACKFILL_BARS`
-(hvor mange bars historikk som hentes ved oppstart) kan overstyres.
+`DB_PATH` (standard `data/fibswingcatcher.db`) og `LOG_LEVEL` kan overstyres.
+Hvor mye historikk som hentes ved oppstart styres av
+`data.backfillLookbackBars` i `src/config/schema.ts`.
+
+I drift: kjør `tsx src/app/main.ts` direkte, **ikke** gjennom `npm start`. npm
+videresender ikke SIGTERM til barneprosessen, så basen lukkes ikke ryddig ved
+stopp. `npm start` er greit lokalt, der du avslutter med Ctrl-C.
 
 ## Sikkerhet
 

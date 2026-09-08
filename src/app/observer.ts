@@ -48,7 +48,30 @@ export class Observer {
     this.minSwingVolume = BigInt(deps.config.strategy.minSwingVolumeQuote)
   }
 
+  /** En handel fra den levende strømmen. Begge klokkene går. */
   async onTrade(trade: Trade): Promise<void> {
+    await this.ingest(trade, false)
+  }
+
+  /**
+   * En handel fra backfillet historikk.
+   *
+   * Backfillen finnes for å gi swing-detektoren struktur, aldri for å trigge.
+   * En replayet handel er minutter til timer gammel, så den:
+   *
+   *   - bygger bars og mater strukturdeteksjonen, og oppretter oppsett;
+   *   - primer `alertsSent` for nivåer prisen alt har passert, så en omstart
+   *     ikke annonserer dem på nytt;
+   *   - utfører **ingen** tilstandsoverganger. Et dypp i sonen for en time
+   *     siden skal ikke etterlate oppsettet som TRIGGERED, for da tier
+   *     `evaluateAll` når prisen kommer tilbake i sonen for ekte;
+   *   - sender **ingen** varsler.
+   */
+  async replay(trade: Trade): Promise<void> {
+    await this.ingest(trade, true)
+  }
+
+  private async ingest(trade: Trade, replay: boolean): Promise<void> {
     if (trade.sizeQuote < this.minTradeSize) return
 
     this.trades.push(trade)
@@ -60,7 +83,7 @@ export class Observer {
       this.detectNewSetups(trade.ts)
     }
 
-    await this.evaluateAll(Number(trade.priceQuote), trade.ts)
+    await this.evaluateAll(Number(trade.priceQuote), trade.ts, replay)
   }
 
   async onStale(sinceMs: number): Promise<void> {
@@ -113,7 +136,7 @@ export class Observer {
     this.deps.log.info({ id: setup.id, levels: setup.levels }, 'nytt oppsett')
   }
 
-  private async evaluateAll(price: number, nowTs: number): Promise<void> {
+  private async evaluateAll(price: number, nowTs: number, replay: boolean): Promise<void> {
     const { strategy } = this.deps.config
 
     for (const setup of this.deps.setups.allActive()) {
@@ -126,7 +149,10 @@ export class Observer {
       })
 
       for (const level of tr.newAlerts) {
+        // Registreringen skjer også under replay: den er nettopp poenget med
+        // primingen, slik at et passert nivå ikke annonseres etter omstart.
         this.deps.setups.recordAlert(setup.id, level)
+        if (replay) continue
         const alert = setup.levels.alerts.find((a) => a.level === level)!
         await this.deps.notifier.send({
           kind: 'milestone',
@@ -135,6 +161,9 @@ export class Observer {
           price: alert.price,
         })
       }
+
+      // Historikk flytter aldri tilstanden. Se `replay()`.
+      if (replay) continue
 
       if (tr.state === setup.state) continue
 

@@ -24,6 +24,12 @@ export const DataSchema = z.object({
   chainId: z.literal(4663),
   maxDataStalenessMs: z.number().int().positive(),
   backfillBlockRange: z.number().int().positive(),
+  /**
+   * Hvor mange bars på strukturtidsrammen som hentes ved oppstart. Eksplisitt
+   * felt, ikke avledet av `maxSetupAgeBars`: tilbakeblikket er en driftskostnad
+   * (RPC-kall) og har ingenting å gjøre med hvor lenge et oppsett får leve.
+   */
+  backfillLookbackBars: z.number().int().positive(),
   reorgDepthBlocks: z.number().int().nonnegative(),
 }).strict()
 
@@ -52,7 +58,11 @@ export const DEFAULT_CONFIG: Config = {
   data: {
     chainId: 4663,
     maxDataStalenessMs: 10_000,
-    backfillBlockRange: 10_000,
+    // Målt mot det offentlige endepunktet: eth_getLogs godtar minst 2 000 000
+    // blokker i ett kall, men er hardt rate-limitet på *antall* kall. Et stort
+    // vindu er derfor billigere enn mange små.
+    backfillBlockRange: 500_000,
+    backfillLookbackBars: 24,
     reorgDepthBlocks: 20,
   },
 }

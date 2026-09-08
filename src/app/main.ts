@@ -11,7 +11,6 @@ import { SWAP_EVENT, toBlockLog, viemLogReader } from '../data/viem.js'
 import { migrate, openDb } from '../store/db.js'
 import { SetupStore, WatchlistStore, type WatchlistEntry } from '../store/setups.js'
 import { NullNotifier } from '../alerts/types.js'
-import { MutableNotifier } from '../alerts/mute.js'
 import { TelegramNotifier, grammySender } from '../alerts/telegram.js'
 import { Observer } from './observer.js'
 
@@ -62,7 +61,7 @@ if (entries.length === 0) {
 }
 
 const labels = new Map(entries.map((e) => [e.poolAddress.toLowerCase(), e.label]))
-const sink = process.env.TELEGRAM_BOT_TOKEN
+const notifier = process.env.TELEGRAM_BOT_TOKEN
   ? new TelegramNotifier({
       send: grammySender(process.env.TELEGRAM_BOT_TOKEN),
       chatId: requireEnv('TELEGRAM_CHAT_ID'),
@@ -71,22 +70,15 @@ const sink = process.env.TELEGRAM_BOT_TOKEN
     })
   : new NullNotifier()
 
-if (sink instanceof NullNotifier) {
+if (notifier instanceof NullNotifier) {
   log.warn({}, 'TELEGRAM_BOT_TOKEN mangler — varsler går ingen steder')
 }
-
-// Dempet gjennom replayen av historikk, sluppet løs når strømmene starter.
-// Replayen gjenskaper hele hendelsesforløpet på nytt, og uten dempingen ville
-// hver omstart sendt en byge av varsler for kurs som beveget seg for timer
-// siden. Nivåene registreres i basen uansett, så ingenting varsles dobbelt
-// senere.
-const notifier = new MutableNotifier(sink, true)
 
 const reader = viemLogReader(http)
 
 const latest = await http.getBlockNumber()
 const perMs = await blocksPerMs(http, latest)
-const lookbackBars = Number(process.env.BACKFILL_BARS ?? DEFAULT_CONFIG.strategy.maxSetupAgeBars * 4)
+const lookbackBars = DEFAULT_CONFIG.data.backfillLookbackBars
 const lookbackMs = lookbackBars * timeframeMs(DEFAULT_CONFIG.strategy.structureTimeframe)
 const lookbackBlocks = BigInt(Math.ceil(lookbackMs * perMs))
 const fromBlock = latest > lookbackBlocks ? latest - lookbackBlocks : 0n
@@ -109,13 +101,16 @@ for (const entry of entries) {
     reader, meta, fromBlock, latest, DEFAULT_CONFIG.data.backfillBlockRange,
   )
   log.info({ pool: entry.label, trades: history.length }, 'backfill ferdig')
-  for (const t of history) await observer.onTrade(t)
+
+  // replay(), ikke onTrade(): historikken skal gi struktur, ikke trigge.
+  for (const t of history) await observer.replay(t)
 
   wired.push({ entry, meta, observer })
 }
 
-// Det ene dempingen koster, er at et oppsett som *alt* står i sonen ved
-// oppstart ikke pushes. Derfor logges tilstanden, slik at operatøren ser den.
+// Replayen varsler ikke, så dette er det eneste stedet oppstartstilstanden er
+// synlig. Et oppsett som alt står i sonen står her som DETECTED, og trigges av
+// den første levende handelen i sonen.
 for (const setup of setups.allActive()) {
   log.info(
     {
@@ -126,8 +121,6 @@ for (const setup of setups.allActive()) {
     'aktivt oppsett etter replay',
   )
 }
-
-notifier.unmute()
 
 const streams: LiveStream[] = []
 

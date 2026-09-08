@@ -67,3 +67,44 @@ describe('backfillTrades', () => {
     expect(await backfillTrades(reader({}), meta, 0n, 9n, 10)).toEqual([])
   })
 })
+
+describe('backfillTrades ved rate-limiting', () => {
+  it('prøver på nytt med voksende pause og lykkes deretter', async () => {
+    const r = reader({ '0-9': [log(5n, 0)] })
+    const inner = r.getLogs
+    let attempts = 0
+    r.getLogs = vi.fn(async (args: { fromBlock: bigint; toBlock: bigint }) => {
+      if (++attempts <= 2) throw new Error('Too Many Requests')
+      return inner(args)
+    })
+    const naps: number[] = []
+    const trades = await backfillTrades(r, meta, 0n, 9n, 10, {
+      sleep: async (ms) => { naps.push(ms) },
+    })
+    expect(attempts).toBe(3)
+    expect(trades).toHaveLength(1)
+    expect(naps).toEqual([500, 1_000])
+  })
+
+  it('gir opp etter siste forsøk og kaster videre', async () => {
+    const r = reader({})
+    r.getLogs = vi.fn(async () => { throw new Error('Too Many Requests') })
+    await expect(
+      backfillTrades(r, meta, 0n, 9n, 10, { maxAttempts: 3, sleep: async () => {} }),
+    ).rejects.toThrow('Too Many Requests')
+    expect(r.getLogs).toHaveBeenCalledTimes(3)
+  })
+
+  it('prøver også blokk-tidsstempler på nytt', async () => {
+    const r = reader({ '0-9': [log(5n, 0)] })
+    const inner = r.getBlock
+    let attempts = 0
+    r.getBlock = vi.fn(async (args: { blockNumber: bigint }) => {
+      if (++attempts === 1) throw new Error('Too Many Requests')
+      return inner(args)
+    })
+    const [trade] = await backfillTrades(r, meta, 0n, 9n, 10, { sleep: async () => {} })
+    expect(attempts).toBe(2)
+    expect(trade!.ts).toBe(1_700_005_000)
+  })
+})
