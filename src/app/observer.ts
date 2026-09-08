@@ -38,14 +38,25 @@ export class Observer {
   private trades: Trade[] = []
   private bars: Bar[] = []
   private lastBarTs = -1
+  private newestTs = Number.NEGATIVE_INFINITY
   private intervalMs: number
+  private windowMs: number
   private minTradeSize: bigint
   private minSwingVolume: bigint
 
   constructor(private deps: ObserverDeps) {
     this.intervalMs = timeframeMs(deps.config.strategy.structureTimeframe)
+    // Strukturvinduet er det samme spennet backfillen henter. Det er den ene
+    // størrelsen som sier hvor mye historikk strukturdeteksjonen skal ha, og
+    // dermed også hvor mye handelsbufferet trenger å holde på.
+    this.windowMs = deps.config.data.backfillLookbackBars * this.intervalMs
     this.minTradeSize = BigInt(deps.config.strategy.minTradeSizeQuote)
     this.minSwingVolume = BigInt(deps.config.strategy.minSwingVolumeQuote)
+  }
+
+  /** Antall handler i det rullende bufferet. For logging og test. */
+  get bufferedTrades(): number {
+    return this.trades.length
   }
 
   /** En handel fra den levende strømmen. Begge klokkene går. */
@@ -74,7 +85,13 @@ export class Observer {
   private async ingest(trade: Trade, replay: boolean): Promise<void> {
     if (trade.sizeQuote < this.minTradeSize) return
 
+    // En handel eldre enn vinduet ville blitt klippet bort med en gang, og kan
+    // verken flytte strukturen eller trigge noe. Den slippes her.
+    if (trade.ts < this.cutoffTs()) return
+
+    if (trade.ts > this.newestTs) this.newestTs = trade.ts
     this.trades.push(trade)
+    this.pruneTrades()
     this.rebuildBars()
 
     const barTs = Math.floor(trade.ts / this.intervalMs) * this.intervalMs
@@ -96,6 +113,32 @@ export class Observer {
 
   async onHealthy(): Promise<void> {
     await this.deps.notifier.send({ kind: 'recovered' })
+  }
+
+  /**
+   * Nedre kant av strukturvinduet, justert ned til en barstart.
+   *
+   * Justeringen finnes for at den eldste beholdte baren alltid skal være hel
+   * fra sin egen begynnelse. Uten den ville klippingen skjært en bar midt av,
+   * og `detectSwings` tar sin første kandidatbunn og -topp fra nettopp
+   * `bars[0]` — en halv bar der ville flyttet startpunktet for deteksjonen.
+   */
+  private cutoffTs(): number {
+    return Math.floor((this.newestTs - this.windowMs) / this.intervalMs) * this.intervalMs
+  }
+
+  /**
+   * Holder handelsbufferen bundet til strukturvinduet.
+   *
+   * Uten dette vokser `trades` uten tak, og siden `rebuildBars` sorterer og
+   * skanner hele arrayen for hver innkommende handel, blir kostnaden
+   * kvadratisk i antall handler. En prosess som skal stå i dagevis og se på en
+   * travel pool maler seg da ned i løpet av timer. Å re-aggregere et *bundet*
+   * vindu på hver handel er greit — poenget er at kostnaden slutter å vokse.
+   */
+  private pruneTrades(): void {
+    const cutoff = this.cutoffTs()
+    this.trades = this.trades.filter((t) => t.ts >= cutoff)
   }
 
   private rebuildBars(): void {

@@ -15,7 +15,10 @@ const pool: PoolMeta = {
   decimals0: 18, decimals1: 18, baseIsToken0: true, feeBps: 30,
 }
 
-function observer(overrides: Partial<typeof DEFAULT_CONFIG.strategy> = {}) {
+function observer(
+  overrides: Partial<typeof DEFAULT_CONFIG.strategy> = {},
+  dataOverrides: Partial<typeof DEFAULT_CONFIG.data> = {},
+) {
   const db = openDb(':memory:')
   migrate(db)
   const setups = new SetupStore(db)
@@ -23,6 +26,7 @@ function observer(overrides: Partial<typeof DEFAULT_CONFIG.strategy> = {}) {
   const config = {
     ...DEFAULT_CONFIG,
     strategy: { ...DEFAULT_CONFIG.strategy, minSwingVolumeQuote: '0', minTradeSizeQuote: '0', ...overrides },
+    data: { ...DEFAULT_CONFIG.data, ...dataOverrides },
   }
   const obs = new Observer({
     pool, label: 'TEST/WETH', config, setups, notifier,
@@ -149,6 +153,48 @@ describe('Observer', () => {
     for (let i = 1; i <= 10; i++) await obs.replay(trade(i * H, 100 + i * 10))
     await obs.replay(trade(11 * H, 195))
     expect(setups.allActive()).toHaveLength(1)
+  })
+
+  it('handelsbufferet stabiliserer seg i stedet for å vokse uten tak', async () => {
+    const { obs } = observer()
+    // Vinduet er backfillLookbackBars (24) bars, barjustert → 25 bars beholdes.
+    for (let i = 1; i <= 200; i++) await obs.onTrade(trade(i * H, 100 + (i % 5)))
+    const steady = obs.bufferedTrades
+    expect(steady).toBe(25)
+    for (let i = 201; i <= 400; i++) await obs.onTrade(trade(i * H, 100 + (i % 5)))
+    expect(obs.bufferedTrades).toBe(steady)
+  })
+
+  it('forkaster en handel som er eldre enn vinduet', async () => {
+    const { obs } = observer()
+    await obs.onTrade(trade(100 * H, 100))
+    expect(obs.bufferedTrades).toBe(1)
+    await obs.onTrade(trade(50 * H, 100))   // 50 bars tilbake — utenfor vinduet
+    expect(obs.bufferedTrades).toBe(1)
+    await obs.onTrade(trade(99 * H, 100))   // innenfor vinduet
+    expect(obs.bufferedTrades).toBe(2)
+  })
+
+  it('klipping endrer ingenting for en sekvens som passer i vinduet', async () => {
+    const seq: Trade[] = []
+    for (let i = 1; i <= 10; i++) seq.push(trade(i * H, 100 + i * 10))
+    seq.push(trade(11 * H, 195))
+    seq.push(trade(12 * H, 137))
+    seq.push(trade(12 * H + 1_000, 125))
+    seq.push(trade(12 * H + 11_000, 140))
+
+    const bounded = observer()
+    const unbounded = observer({}, { backfillLookbackBars: 100_000 })
+    for (const t of seq) {
+      await bounded.obs.onTrade(t)
+      await unbounded.obs.onTrade(t)
+    }
+
+    // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort
+    expect(bounded.obs.bufferedTrades).toBe(seq.length)
+    expect(bounded.setups.allActive()).toEqual(unbounded.setups.allActive())
+    expect(bounded.notifier.sent).toEqual(unbounded.notifier.sent)
+    expect(bounded.notifier.sent.length).toBeGreaterThan(0)
   })
 
   it('overlever omstart — oppsett og sendte varsler hentes fra basen', async () => {

@@ -105,6 +105,11 @@ for (const entry of entries) {
   // replay(), ikke onTrade(): historikken skal gi struktur, ikke trigge.
   for (const t of history) await observer.replay(t)
 
+  log.info(
+    { pool: entry.label, buffertHandler: observer.bufferedTrades, vinduBars: DEFAULT_CONFIG.data.backfillLookbackBars },
+    'replay ferdig',
+  )
+
   wired.push({ entry, meta, observer })
 }
 
