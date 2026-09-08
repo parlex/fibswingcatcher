@@ -164,7 +164,7 @@ async function start(): Promise<void> {
     for (const t of history) await observer.replay(t)
 
     log.info(
-      { pool: entry.label, buffertHandler: observer.bufferedTrades, vinduBars: config.data.backfillLookbackBars },
+      { pool: entry.label, beholdteBars: observer.retainedBars, passert: observer.accepted, filtrertBort: observer.filtered, vinduBars: config.data.backfillLookbackBars },
       'replay ferdig',
     )
 

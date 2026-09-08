@@ -3,7 +3,8 @@ import type { Bar, Trade } from '../domain/types.js'
 import type { PoolMeta } from '../data/pool.js'
 import type { Notifier } from '../alerts/types.js'
 import type { SetupStore } from '../store/setups.js'
-import { aggregate, timeframeMs } from '../bars/aggregator.js'
+import { timeframeMs } from '../bars/aggregator.js'
+import { IncrementalBars } from '../bars/incremental.js'
 import { detectSwings } from '../strategy/swings.js'
 import { createSetup, evaluateSetup } from '../strategy/setups.js'
 import { toBaseUnits } from '../domain/units.js'
@@ -68,8 +69,9 @@ const MAX_SPOT_DIVERGENCE = 0.05
  * Å slå dem sammen er nøyaktig den feilen hele prosjektet finnes for å unngå.
  */
 export class Observer {
-  private trades: Trade[] = []
-  private bars: Bar[] = []
+  private barsStore: IncrementalBars
+  private acceptedCount = 0
+  private filteredCount = 0
   private lastBarTs = -1
   private newestTs = Number.NEGATIVE_INFINITY
   private intervalMs: number
@@ -90,11 +92,32 @@ export class Observer {
     const quoteDecimals = deps.pool.baseIsToken0 ? deps.pool.decimals1 : deps.pool.decimals0
     this.minTradeSize = toBaseUnits(deps.config.strategy.minTradeSizeQuote, quoteDecimals)
     this.minSwingVolume = toBaseUnits(deps.config.strategy.minSwingVolumeQuote, quoteDecimals)
+    this.barsStore = new IncrementalBars(this.intervalMs, this.windowMs, this.minTradeSize)
   }
 
-  /** Antall handler i det rullende bufferet. For logging og test. */
-  get bufferedTrades(): number {
-    return this.trades.length
+  /**
+   * Antall beholdte bars. Dette er størrelsen som er bundet — rå handler
+   * beholdes ikke i det hele tatt.
+   */
+  get retainedBars(): number {
+    return this.barsStore.size()
+  }
+
+  /** Handler som passerte størrelsesterskelen. */
+  get accepted(): number {
+    return this.acceptedCount
+  }
+
+  /**
+   * Handler som ble filtrert bort som for små.
+   *
+   * Sammen med `accepted` er dette diagnostikken for om størrelsesfilteret
+   * faktisk biter på en gitt pool. Er `filtered` null over tusenvis av
+   * handler, er terskelen for lav for quote-tokenet — som er nøyaktig
+   * feilmodusen på en stablecoin-priset pool.
+   */
+  get filtered(): number {
+    return this.filteredCount
   }
 
   /** En handel fra den levende strømmen. Begge klokkene går. */
@@ -121,7 +144,10 @@ export class Observer {
   }
 
   private async ingest(trade: Trade, replay: boolean): Promise<void> {
-    if (trade.sizeQuote < this.minTradeSize) return
+    if (trade.sizeQuote < this.minTradeSize) {
+      this.filteredCount += 1
+      return
+    }
 
     // En handel eldre enn vinduet slippes her, før den kommer inn. Klippingen
     // nedenfor ville fjernet den igjen umiddelbart — men ikke før
@@ -130,9 +156,8 @@ export class Observer {
     if (trade.ts < this.cutoffTs()) return
 
     if (trade.ts > this.newestTs) this.newestTs = trade.ts
-    this.trades.push(trade)
-    this.pruneTrades()
-    this.rebuildBars()
+    this.acceptedCount += 1
+    this.barsStore.add(trade)
 
     const barTs = Math.floor(trade.ts / this.intervalMs) * this.intervalMs
     if (barTs > this.lastBarTs) {
@@ -168,24 +193,6 @@ export class Observer {
   }
 
   /**
-   * Holder handelsbufferen bundet til strukturvinduet.
-   *
-   * Uten dette vokser `trades` uten tak, og siden `rebuildBars` sorterer og
-   * skanner hele arrayen for hver innkommende handel, blir kostnaden
-   * kvadratisk i antall handler. En prosess som skal stå i dagevis og se på en
-   * travel pool maler seg da ned i løpet av timer. Å re-aggregere et *bundet*
-   * vindu på hver handel er greit — poenget er at kostnaden slutter å vokse.
-   */
-  private pruneTrades(): void {
-    const cutoff = this.cutoffTs()
-    this.trades = this.trades.filter((t) => t.ts >= cutoff)
-  }
-
-  private rebuildBars(): void {
-    this.bars = aggregate(this.trades, this.intervalMs, this.minTradeSize)
-  }
-
-  /**
    * Bare de *lukkede* barene. Den siste baren i `this.bars` inneholder
    * handelen som nettopp kom inn og er per definisjon ufullstendig.
    *
@@ -198,7 +205,7 @@ export class Observer {
    * en `zoneTop` 4,9 % for lav, altså en halv sonebredde feil.
    */
   private closedBars(): Bar[] {
-    return this.bars.slice(0, -1)
+    return this.barsStore.bars().slice(0, -1)
   }
 
   /** Sluttprisen på siste lukkede bar, for ugyldiggjøring på lukking. */

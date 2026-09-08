@@ -276,22 +276,27 @@ describe('Observer', () => {
     expect(setups.allActive()).toHaveLength(1)
   })
 
-  it('handelsbufferet stabiliserer seg i stedet for å vokse uten tak', async () => {
+  it('minnet stabiliserer seg på bars, ikke på handler', async () => {
     const { obs } = observer()
-    // To handler per bar, én på barstart og én midt i baren. Vinduet er
-    // backfillLookbackBars (24) bars og kanten justeres ned til en barstart,
-    // så 25 hele bars × 2 handler = 50 beholdes.
+    // Rå handler beholdes ikke i det hele tatt: `detectSwings` tar bars og
+    // `evaluateSetup` tar en pris. Det bundne er derfor antall bars — 24 i
+    // vinduet pluss den kanten justeres ned til, altså 25 — uansett hvor
+    // travel poolen er.
     const feed = async (from: number, to: number) => {
       for (let i = from; i <= to; i++) {
-        await obs.onTrade(trade(i * H, 100 + (i % 5)))
-        await obs.onTrade(trade(i * H + H / 2, 100 + (i % 5)))
+        for (let k = 0; k < 20; k++) {
+          await obs.onTrade(trade(i * H + k * 90_000, 100 + (i % 5)))
+        }
       }
     }
-    await feed(1, 200)
-    const steady = obs.bufferedTrades
-    expect(steady).toBe(50)
-    await feed(201, 400)
-    expect(obs.bufferedTrades).toBe(steady)
+    await feed(1, 100)
+    expect(obs.retainedBars).toBe(25)
+    const acceptedAfterFirst = obs.accepted
+
+    await feed(101, 200)
+    // Bundet selv om dobbelt så mange handler har passert gjennom.
+    expect(obs.retainedBars).toBe(25)
+    expect(obs.accepted).toBe(acceptedAfterFirst * 2)
   })
 
   it('forkaster en handel eldre enn vinduet — verken husket eller evaluert', async () => {
@@ -304,14 +309,14 @@ describe('Observer', () => {
     await obs.onTrade(trade(111 * H, 195))
 
     const setupsBefore = setups.allActive()
-    const buffered = obs.bufferedTrades
+    const acceptedBefore = obs.accepted
     expect(setupsBefore).toHaveLength(1)
 
     // 61 bars tilbake, langt utenfor 24-bars vinduet, til en pris godt under
     // swing low — den ville ugyldiggjort oppsettet om den ble evaluert.
     await obs.onTrade(trade(50 * H, 10))
 
-    expect(obs.bufferedTrades).toBe(buffered)
+    expect(obs.accepted).toBe(acceptedBefore)
     expect(setups.allActive()).toEqual(setupsBefore)
     expect(notifier.sent).toEqual([])
   })
@@ -332,7 +337,7 @@ describe('Observer', () => {
     }
 
     // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort
-    expect(bounded.obs.bufferedTrades).toBe(seq.length)
+    expect(bounded.obs.accepted).toBe(seq.length)
     expect(bounded.setups.allActive()).toEqual(unbounded.setups.allActive())
     expect(bounded.notifier.sent).toEqual(unbounded.notifier.sent)
     expect(bounded.notifier.sent.length).toBeGreaterThan(0)
@@ -527,9 +532,9 @@ describe('Observer', () => {
       })
       // minTradeSizeQuote er '0.015': 0,014 skal falle, 0,016 skal telle
       await obs.onTrade(trade(1 * H, 130, 14n * oneToken / 1_000n))
-      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(0)
+      expect(obs.accepted, `${decimals} desimaler`).toBe(0)
       await obs.onTrade(trade(1 * H, 130, 16n * oneToken / 1_000n))
-      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(1)
+      expect(obs.accepted, `${decimals} desimaler`).toBe(1)
     }
   })
 
