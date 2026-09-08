@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { SetupStore, WatchlistStore } from '../../src/store/setups.js'
 import { migrate, openDb } from '../../src/store/db.js'
 import { createSetup } from '../../src/strategy/setups.js'
+import { fibLevels } from '../../src/strategy/fib.js'
 import type { Swing } from '../../src/domain/types.js'
 
 const POOL = '0x1111111111111111111111111111111111111111' as const
@@ -166,5 +167,36 @@ describe('SetupStore per pool', () => {
     expect(setups.recordAlert(a.id, 0.618)).toBe(true)
     expect(setups.recordAlert(a.id, 0.618)).toBe(false)
     expect(setups.recordAlert('finnes-ikke', 0.618)).toBe(false)
+  })
+})
+
+describe('SetupStore.upsert erstatter hele raden', () => {
+  it('oppdaterer swing_json, ikke bare state og levels', () => {
+    // Den gamle ON CONFLICT lot swing_json stå. Da kunne raden bære et swing
+    // fra første skriving ved siden av levels regnet fra et annet.
+    const { setups } = store()
+    const a = createSetup(POOL, swing, FIB, 1000)
+    setups.upsert(a)
+
+    const extended: Swing = { ...swing, highTs: 20 * 3_600_000, high: '300' }
+    setups.upsert({ ...a, swing: extended, levels: fibLevels(extended, FIB) })
+
+    const back = setups.get(a.id)!
+    expect(back.swing.high).toBe('300')
+    expect(back.levels.zoneTop).toBeCloseTo(fibLevels(extended, FIB).zoneTop, 9)
+  })
+
+  it('bevarer state og alertsSent når kalleren sender dem med', () => {
+    const { setups } = store()
+    const a = createSetup(POOL, swing, FIB, 1000)
+    setups.upsert(a)
+    setups.recordAlert(a.id, 0.618)
+    const armed = setups.get(a.id)!
+    setups.upsert({ ...armed, state: 'TRIGGERED' })
+
+    const back = setups.get(a.id)!
+    expect(back.state).toBe('TRIGGERED')
+    expect(back.alertsSent).toEqual([0.618])
+    expect(back.createdAtTs).toBe(1000)
   })
 })

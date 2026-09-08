@@ -397,9 +397,18 @@ reorg.
 Reell angrepsvektor: én liten swap kan printe en absurd pris, og noen kan bevisst
 wicke en tynn pool ned i sonen for å trigge boter og selge inn i kjøpet.
 
-1. Handler under `minTradeSizeUsd` teller hverken i bar-bygging eller som trigger
-2. En sone-berøring valideres mot **poolens spotpris fra reservene**, ikke bare
-   mot den printede handelsprisen
+1. Handler under `minTradeSizeQuote` teller hverken i bar-bygging eller som
+   trigger. Terskelen er uttrykt i quote-token og **må skaleres med tokenets
+   desimaler** før den sammenlignes med beløpene i et Swap-event, som er rå
+   kjede-enheter. Uten skaleringen betyr «50» femti wei, altså ingen terskel.
+2. En sone-berøring valideres mot **en uavhengig lesning av poolens pris**
+   (`slot0`), ikke bare mot den printede handelsprisen.
+
+   Merk: å lese `sqrtPriceX96` fra selve eventen er *ikke* denne valideringen.
+   Det feltet er poolens pris etter swappen, og i en tynn pool flytter en liten
+   swap den langt — eventen rapporterer da den manipulerte prisen korrekt. Et
+   uavhengig oppslag etterpå ser prisen slik den faktisk står, og det er
+   forskjellen som kan måles.
 
 ### 6.8 Observabilitet
 

@@ -12,12 +12,24 @@ export type Setup = {
 }
 
 export type EvalCtx = {
+  /** Siste handelspris. Triggerklokken — den ser hvert tick. */
   price: number
   nowTs: number
   intervalMs: number
   maxSetupAgeBars: number
   minRR: number
   tpPct: number
+  /**
+   * Sluttprisen på den siste *lukkede* baren, eller `undefined` når ingen bar
+   * har lukket ennå.
+   *
+   * Ugyldiggjøring krever en lukking under swing low, mens trigger fortsatt
+   * skjer på tick. Asymmetrien er spec 2.4 sin egen, og den er prinsipiell:
+   * en inngang skal fanges fort, et strukturbrudd skal bekreftes sakte. Uten
+   * den holder ett enkelt wick — eller én manipulert støvhandel — for å
+   * ødelegge et gyldig oppsett for godt.
+   */
+  lastClosedBarClose: number | undefined
 }
 
 export type SetupTransition = {
@@ -44,8 +56,12 @@ export function evaluateSetup(setup: Setup, ctx: EvalCtx): SetupTransition {
   const none: number[] = []
   const swingLow = Number(setup.swing.low)
 
-  if (ctx.price < swingLow) {
-    return { state: 'INVALIDATED', reason: 'pris under swing low', newAlerts: none }
+  if (ctx.lastClosedBarClose !== undefined && ctx.lastClosedBarClose < swingLow) {
+    return {
+      state: 'INVALIDATED',
+      reason: `bar lukket på ${ctx.lastClosedBarClose} under swing low ${swingLow}`,
+      newAlerts: none,
+    }
   }
 
   const ageBars = (ctx.nowTs - setup.createdAtTs) / ctx.intervalMs

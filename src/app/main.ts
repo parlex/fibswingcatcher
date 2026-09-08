@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import pino from 'pino'
 import { createPublicClient, webSocket } from 'viem'
-import { DEFAULT_CONFIG } from '../config/schema.js'
+import { ConfigSchema, DEFAULT_CONFIG } from '../config/schema.js'
 import { timeframeMs } from '../bars/aggregator.js'
 import { robinhoodChain, publicClient } from '../chain/client.js'
 import { type PoolMeta, loadPoolMeta } from '../data/pool.js'
@@ -9,6 +9,8 @@ import { LiveStream } from '../data/live.js'
 import { backfillTrades } from '../data/backfill.js'
 import { SWAP_EVENT, isResultLimitError, toBlockLog, viemLogReader } from '../data/viem.js'
 import { lookbackFrom, measureBlocksPerMs } from '../data/lookback.js'
+import { readSpotPrice } from '../data/spot.js'
+import { withRetry } from '../data/retry.js'
 import { migrate, openDb } from '../store/db.js'
 import { SetupStore, WatchlistStore, type WatchlistEntry } from '../store/setups.js'
 import { NullNotifier } from '../alerts/types.js'
@@ -16,6 +18,15 @@ import { TelegramNotifier, grammySender } from '../alerts/telegram.js'
 import { Observer } from './observer.js'
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' })
+
+/**
+ * Konfigurasjonen går gjennom skjemaet, den blir ikke bare antatt å passe.
+ *
+ * `main.ts` sendte tidligere `DEFAULT_CONFIG`-literalen rett videre, så
+ * `min(4)`-gulvet, `fibZoneTop < fibEntry`-refinementet og `.strict()` var død
+ * kode i drift — validering som bare kjørte i sin egen test.
+ */
+const config = ConfigSchema.parse(DEFAULT_CONFIG)
 
 function requireEnv(name: string): string {
   const value = process.env[name]
@@ -88,26 +99,27 @@ process.on('uncaughtException', (err) => {
 
 async function start(): Promise<void> {
   const latest = await http.getBlockNumber()
-  const lookbackBars = DEFAULT_CONFIG.data.backfillLookbackBars
-  const lookbackMs = lookbackBars * timeframeMs(DEFAULT_CONFIG.strategy.structureTimeframe)
+  const lookbackBars = config.data.backfillLookbackBars
+  const lookbackMs = lookbackBars * timeframeMs(config.strategy.structureTimeframe)
   const lookback = lookbackFrom(latest, await measureBlocksPerMs(http, latest), lookbackMs)
   const { fromBlock } = lookback
 
-  if (lookback.guarded) {
+  if (lookback.rateSource !== 'measured') {
+    // Fallbacken gir 86 400 blokker, altså ~2 bars på denne kjeden — under
+    // skjemaets eget gulv på 4, som er der deteksjonen blir «lydløst død».
+    // Med kantregelen alltid på produserer et så tynt vindu ingen oppsett i
+    // det hele tatt. En bot som starter og tier er verre enn en som nekter.
     log.error(
       {
         maalt: lookback.measuredBlocksPerMs,
-        brukt: lookback.blocksPerMs,
-        lookbackBlocks: lookback.lookbackBlocks,
+        villeBrukt: lookback.lookbackBlocks,
+        gulvBars: config.data.backfillLookbackBars,
         latest,
+        guarded: lookback.guarded,
       },
-      'blokktakten ser feil ut — bruker et kort, forsiktig tilbakeblikk framfor å skanne kjeden',
+      'kunne ikke måle blokktakten pålitelig — nekter å starte med et tilbakeblikk under gulvet',
     )
-  } else if (lookback.rateSource !== 'measured') {
-    log.warn(
-      { maalt: lookback.measuredBlocksPerMs, brukt: lookback.blocksPerMs, kilde: lookback.rateSource },
-      'blokktakten kunne ikke måles pålitelig',
-    )
+    stop(1)
   }
 
   log.info(
@@ -127,12 +139,17 @@ async function start(): Promise<void> {
   for (const entry of entries) {
     const meta = await loadPoolMeta(http, entry.poolAddress, entry.quoteToken)
     const observer = new Observer({
-      pool: meta, label: entry.label, config: DEFAULT_CONFIG, setups, notifier, log,
+      pool: meta, label: entry.label, config, setups, notifier, log,
+      // Spec 6.7 mottiltak 2. Ett kall, bare ved tilstandsendringer.
+      spotPrice: () => withRetry(() => readSpotPrice(http, meta), {
+        onRetry: ({ attempt, delayMs }) =>
+          log.warn({ pool: entry.label, attempt, delayMs }, 'slot0-oppslag feilet — prøver igjen'),
+      }),
     })
 
     // Backfill nok historikk til at swing-deteksjonen har noe å jobbe med
     const history = await backfillTrades(
-      reader, meta, fromBlock, latest, DEFAULT_CONFIG.data.backfillBlockRange,
+      reader, meta, fromBlock, latest, config.data.backfillBlockRange,
       {
         onRetry: ({ attempt, delayMs, error }) =>
           log.warn({ pool: entry.label, attempt, delayMs, err: error }, 'RPC-kall feilet — prøver igjen'),
@@ -147,7 +164,7 @@ async function start(): Promise<void> {
     for (const t of history) await observer.replay(t)
 
     log.info(
-      { pool: entry.label, buffertHandler: observer.bufferedTrades, vinduBars: DEFAULT_CONFIG.data.backfillLookbackBars },
+      { pool: entry.label, buffertHandler: observer.bufferedTrades, vinduBars: config.data.backfillLookbackBars },
       'replay ferdig',
     )
 
@@ -191,10 +208,23 @@ async function start(): Promise<void> {
       now: () => Date.now(),
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
-      maxStalenessMs: DEFAULT_CONFIG.data.maxDataStalenessMs,
+      maxStalenessMs: config.data.maxDataStalenessMs,
       meta,
-      reorgDepthBlocks: DEFAULT_CONFIG.data.reorgDepthBlocks,
-      blockTs: async (bn) => Number((await http.getBlock({ blockNumber: bn })).timestamp) * 1000,
+      reorgDepthBlocks: config.data.reorgDepthBlocks,
+      // Retry her, cache inne i LiveStream. Ett 429 fra dette kallet felte
+      // tidligere hele prosessen gjennom `unhandledRejection`.
+      blockTs: async (bn) => {
+        const block = await withRetry(() => http.getBlock({ blockNumber: bn }), {
+          onRetry: ({ attempt, delayMs }) =>
+            log.warn({ pool: entry.label, bn, attempt, delayMs }, 'blokkoppslag feilet — prøver igjen'),
+        })
+        return Number(block.timestamp) * 1000
+      },
+      onLogError: (err, raw) =>
+        log.error(
+          { pool: entry.label, tx: raw.transactionHash, logIndex: raw.logIndex, err },
+          'kunne ikke behandle en swap-logg — hoppet over, strømmen står',
+        ),
     })
 
     // Én kjede per observatør. viem leverer flere logger i samme batch, og et

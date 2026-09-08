@@ -4,7 +4,7 @@ import { aggregate, timeframeMs } from '../../src/bars/aggregator.js'
 
 const t = (ts: number, price: string, sizeQuote: bigint, logIndex?: number): Trade => ({
   ts, txHash: '0xabc', logIndex: logIndex ?? ts, priceQuote: price,
-  sizeQuote, sizeBase: 1n, side: 'buy',
+  sizeQuote, sizeBase: 1n, side: 'buy', liquidity: 10n ** 24n,
 })
 
 describe('timeframeMs', () => {

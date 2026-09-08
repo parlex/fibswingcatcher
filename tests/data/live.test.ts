@@ -23,7 +23,11 @@ const mkLog = (logIndex: number, opts: { txHash?: string; blockNumber?: bigint }
   ),
 })
 
-function harness(maxStalenessMs = 10_000, reorgDepthBlocks = 20) {
+function harness(
+  maxStalenessMs = 10_000,
+  reorgDepthBlocks = 20,
+  blockTs: (bn: bigint) => Promise<number> = async () => 1_700_000_000,
+) {
   let onLog: ((l: BlockLog) => void) | undefined
   let onError: ((e: Error) => void) | undefined
   let clock = 0
@@ -40,6 +44,9 @@ function harness(maxStalenessMs = 10_000, reorgDepthBlocks = 20) {
   const setTimer = vi.fn((fn: () => void, ms: number) => { const t = { fn, at: clock + ms }; timers.push(t); return t })
   const clearTimer = vi.fn((t: unknown) => { const i = timers.findIndex((x) => x === t); if (i >= 0) timers.splice(i, 1) })
 
+  const blockTsCalls: bigint[] = []
+  const logErrors: unknown[] = []
+
   const stream = new LiveStream({
     subscribe,
     now: () => clock,
@@ -48,12 +55,14 @@ function harness(maxStalenessMs = 10_000, reorgDepthBlocks = 20) {
     maxStalenessMs,
     meta,
     reorgDepthBlocks,
-    blockTs: async () => 1_700_000_000,
+    blockTs: (bn) => { blockTsCalls.push(bn); return blockTs(bn) },
+    onLogError: (e) => logErrors.push(e),
   })
   stream.on((e) => events.push(e))
 
   return {
     stream, events, subscribe, unsubscribe, setTimer, clearTimer, timers, calls, maxStalenessMs,
+    blockTsCalls, logErrors,
     emitLog: (i: number, opts?: { txHash?: string; blockNumber?: bigint }) => onLog?.(mkLog(i, opts)),
     emitError: (e: Error) => onError?.(e),
     advance: (ms: number) => {
@@ -170,7 +179,7 @@ describe('LiveStream', () => {
     const timers: { fn: () => void; at: number }[] = []
     const events: StreamEvent[] = []
     const unsubscribe = vi.fn()
-    const subscribe = vi.fn((l: typeof onLog, e: typeof onError) => { onLog = l; onError = e; return unsubscribe })
+    const subscribe = vi.fn((l: (log: BlockLog) => void, e: (err: Error) => void) => { onLog = l; onError = e; return unsubscribe })
     const stream = new LiveStream({
       subscribe,
       now: () => clock,
@@ -180,6 +189,7 @@ describe('LiveStream', () => {
       meta,
       reorgDepthBlocks: 20,
       blockTs: () => new Promise<number>((resolve) => { resolveTs = resolve }),
+      onLogError: () => {},
     })
     stream.on((e) => events.push(e))
 
@@ -321,5 +331,51 @@ describe('LiveStream', () => {
     h.setTimer(() => order.push('C'), 500)
     h.advance(500)
     expect(order).toEqual(['A', 'B', 'C'])
+  })
+})
+
+describe('LiveStream tåler at blockTs feiler', () => {
+  it('overlever en avvist blockTs og fortsetter å levere', async () => {
+    let attempt = 0
+    const h = harness(10_000, 20, async () => {
+      if (++attempt === 1) throw new Error('Too Many Requests')
+      return 1_700_000_000
+    })
+    h.stream.start()
+
+    h.emitLog(0)
+    await vi.waitFor(() => expect(h.logErrors).toHaveLength(1))
+    expect((h.logErrors[0] as Error).message).toBe('Too Many Requests')
+    expect(h.events.filter((e) => e.kind === 'trade')).toHaveLength(0)
+
+    // Strømmen står, og neste logg kommer gjennom
+    h.emitLog(1)
+    await vi.waitFor(() => expect(h.events.filter((e) => e.kind === 'trade')).toHaveLength(1))
+  })
+
+  it('slipper dedupe-nøkkelen for en logg som feilet, slik at et nytt forsøk går gjennom', async () => {
+    let attempt = 0
+    const h = harness(10_000, 20, async () => {
+      if (++attempt === 1) throw new Error('hikk')
+      return 1_700_000_000
+    })
+    h.stream.start()
+
+    h.emitLog(0)
+    await vi.waitFor(() => expect(h.logErrors).toHaveLength(1))
+
+    // Samme logg om igjen — den skal ikke være «sett» siden den ikke ble levert
+    h.emitLog(0)
+    await vi.waitFor(() => expect(h.events.filter((e) => e.kind === 'trade')).toHaveLength(1))
+  })
+
+  it('henter blokk-tidsstempelet én gang per blokk', async () => {
+    const h = harness()
+    h.stream.start()
+    h.emitLog(0, { blockNumber: 5n })
+    h.emitLog(1, { blockNumber: 5n })
+    h.emitLog(2, { blockNumber: 5n })
+    await vi.waitFor(() => expect(h.events.filter((e) => e.kind === 'trade')).toHaveLength(3))
+    expect(h.blockTsCalls).toEqual([5n])
   })
 })

@@ -1096,7 +1096,11 @@ git commit -m "feat: ren tilstandsmaskin for oppsettets livssyklus"
   - `function decodeSwapLog(log: RawLog, meta: PoolMeta, blockTs: number): Trade`
   - `function priceFromSqrtX96(sqrtPriceX96: bigint, meta: PoolMeta): string`
 
-**Dette dekker spec 6.7, mottiltak 2.** Prisen leses fra `sqrtPriceX96` i selve eventen, som *er* poolens spotpris etter handelen — utledet av reservene, ikke av mengdeforholdet i én enkelt swap. En bittelitenswap som forsøker å printe en absurd pris kan derfor ikke lyve om nivået. Mottiltak 1, størrelsesfilteret, ligger i Task 2 og Task 11.
+**Dette dekker *ikke* spec 6.7, mottiltak 2.** Den opprinnelige teksten her påsto at en bitteliten swap «ikke kan lyve om nivået» fordi prisen leses fra `sqrtPriceX96`. Det er galt om mekanismen. `sqrtPriceX96` i et V3 Swap-event er poolens pris *etter* swappen, og prispåvirkning i V3 er omvendt proporsjonal med aktiv likviditet — som er selve definisjonen av en tynn pool. En liten swap der flytter prisen langt, og eventen rapporterer den manipulerte verdien helt korrekt.
+
+Hva `sqrtPriceX96` faktisk kjøper: den fjerner skjevheten i `amount1/amount0`, som er forurenset av gebyrer og delvise fills. Det er en reell forbedring av *prisnøyaktigheten*, men ikke et forsvar mot manipulasjon.
+
+Mottiltak 2 — å validere mot en uavhengig lesning av poolens pris — er implementert i Task 11 som et `slot0`-oppslag ved tilstandsendrende evalueringer (`src/data/spot.ts`, `Observer.priceLooksReal`). Mottiltak 1, størrelsesfilteret, ligger i Task 2 og Task 11, og krever at terskelen skaleres med quote-tokenets desimaler før den sammenlignes med rå kjede-enheter.
 
 **Dette er planens eneste task som starter med en undersøkelse.** Vi vet at Uniswap er deployet på Robinhood Chain, men ikke hvilken versjon, og event-signaturen avgjør hele dekoderen. Å gjette her og oppdage feilen i Task 11 ville kastet bort tre tasks.
 

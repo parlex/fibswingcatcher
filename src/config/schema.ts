@@ -2,18 +2,31 @@ import { z } from 'zod'
 
 const pct = z.number().positive().max(100)
 
+/**
+ * En tokenmengde slik et menneske skriver den, i quote-tokenets egen enhet —
+ * ikke i tokenets minste enhet.
+ *
+ * Valideringen finnes fordi `z.string()` godtok både `'femti'` og `'50,5'`, og
+ * begge kastet en rå `SyntaxError` fra `BigInt()` inne i `Observer`-
+ * konstruktøren, altså etter oppstart og langt fra årsaken. Skaleringen til
+ * kjedens enheter skjer i `toBaseUnits`, som trenger et tall den kan stole på.
+ */
+const quoteAmount = z.string().regex(/^\d+(\.\d+)?$/, {
+  message: 'må være en tokenmengde med siffer og eventuelt ett desimalpunkt, f.eks. "50" eller "0.5"',
+})
+
 export const StrategySchema = z.object({
   structureTimeframe: z.enum(['5m', '15m', '1h', '4h']),
   minSwingPct: pct,
   minSwingDurationMs: z.number().int().nonnegative(),
-  minSwingVolumeQuote: z.string(),
+  minSwingVolumeQuote: quoteAmount,
   fibEntry: z.number().gt(0).lt(1),
   fibZoneTop: z.number().gt(0).lt(1),
   tpPct: pct,
   slBufferPct: pct,
   minRR: z.number().positive(),
   maxSetupAgeBars: z.number().int().positive(),
-  minTradeSizeQuote: z.string(),
+  minTradeSizeQuote: quoteAmount,
   alertLevels: z.array(z.number().gt(0).lt(1)).nonempty(),
 }).strict().refine((s) => s.fibZoneTop < s.fibEntry, {
   message: 'fibZoneTop må være grunnere enn fibEntry',

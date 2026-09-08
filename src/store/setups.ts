@@ -23,13 +23,27 @@ const toSetup = (r: Row): Setup => ({
 export class SetupStore {
   constructor(private db: Db) {}
 
+  /**
+   * Skriver raden slik den er gitt — alle kolonner, ikke bare noen.
+   *
+   * Den forrige versjonen oppdaterte `state`, `levels_json` og `alerts_json`
+   * men ikke `swing_json`, `pool_address` eller `created_at_ts`. Det ga en rad
+   * som kunne bære to forskjellige beina samtidig: et `swing` fra første
+   * skriving ved siden av `levels` regnet fra et annet. Alle kallere sender et
+   * fullstendig `Setup` (`upsert({ ...s, state })`, `upsert({ ...s,
+   * alertsSent })`, `upsert(setup)`), så full erstatning er det de allerede
+   * mener — og den fjerner fellen.
+   */
   upsert(s: Setup): void {
     this.db.prepare(`
       INSERT INTO setups (id, pool_address, state, swing_json, levels_json, created_at_ts, alerts_json)
       VALUES (@id, @pool, @state, @swing, @levels, @created, @alerts)
       ON CONFLICT(id) DO UPDATE SET
+        pool_address = excluded.pool_address,
         state = excluded.state,
+        swing_json = excluded.swing_json,
         levels_json = excluded.levels_json,
+        created_at_ts = excluded.created_at_ts,
         alerts_json = excluded.alerts_json
     `).run({
       id: s.id, pool: s.poolAddress, state: s.state,

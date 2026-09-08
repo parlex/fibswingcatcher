@@ -10,8 +10,9 @@ const swing: Swing = { lowTs: 0, low: '100', highTs: 10 * H, high: '200', confir
 const FIB = { fibEntry: 0.886, fibZoneTop: 0.786, slBufferPct: 2, alertLevels: [0.5, 0.618, 0.786] }
 
 const setup = () => createSetup(POOL, swing, FIB, 10 * H)
-const ctx = (price: number, nowTs = 11 * H) => ({
+const ctx = (price: number, nowTs = 11 * H, lastClosedBarClose?: number) => ({
   price, nowTs, intervalMs: H, maxSetupAgeBars: 48, minRR: 3, tpPct: 60,
+  lastClosedBarClose,
 })
 
 describe('createSetup', () => {
@@ -58,10 +59,21 @@ describe('evaluateSetup', () => {
     expect(tr.state).toBe('TRIGGERED')
   })
 
-  it('går til INVALIDATED når prisen bryter under swing low', () => {
-    const tr = evaluateSetup(setup(), ctx(99))
+  it('går til INVALIDATED når en bar lukker under swing low', () => {
+    const tr = evaluateSetup(setup(), ctx(99, 11 * H, 99))
     expect(tr.state).toBe('INVALIDATED')
     expect(tr.reason).toMatch(/swing low/)
+  })
+
+  it('ugyldiggjør ikke på et wick under swing low uten lukking', () => {
+    // Spec 2.4: prisen må *lukke* under bunnen. Ett tick holder ikke, ellers
+    // er én manipulert støvhandel nok til å ødelegge et gyldig oppsett.
+    const tr = evaluateSetup(setup(), ctx(1, 11 * H, 150))
+    expect(tr.state).not.toBe('INVALIDATED')
+  })
+
+  it('ugyldiggjør ikke før noen bar har lukket', () => {
+    expect(evaluateSetup(setup(), ctx(1, 11 * H, undefined)).state).not.toBe('INVALIDATED')
   })
 
   it('går til EXPIRED etter maxSetupAgeBars', () => {
@@ -87,8 +99,8 @@ describe('evaluateSetup', () => {
     expect(tr.state).toBe('REJECTED')
   })
 
-  it('ugyldiggjør når prisen er godt under swing low', () => {
-    const tr = evaluateSetup(setup(), ctx(97))
+  it('ugyldiggjør når en bar lukker godt under swing low', () => {
+    const tr = evaluateSetup(setup(), ctx(97, 11 * H, 97))
     expect(tr.state).toBe('INVALIDATED')
   })
 

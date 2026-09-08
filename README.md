@@ -43,6 +43,14 @@ plan sammen med risikomotoren og eksekveringen. Observatøren disarmerer
 allerede `ARMED` når datastrømmen blir stale, slik at den delen er på plass
 før det finnes noe som armerer.
 
+## Kjente grenser i plan 1
+
+Ikke pek boten på kjedens travleste pools ennå. Observatøren re-aggregerer
+handelsvinduet for hver innkommende handel, og på en pool med over én swap per
+blokk blir det for dyrt før plan 2 innfører inkrementell bar-vedlikehold.
+Backfillen ved oppstart henter dessuten ett blokk-tidsstempel per unike blokk,
+sekvensielt, så oppstartstiden vokser med poolens aktivitet.
+
 ## Sikkerhet
 
 - Boten bruker en dedikert hot wallet som kun finansieres med beløp som tåles tapt

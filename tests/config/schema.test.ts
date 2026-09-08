@@ -44,6 +44,25 @@ describe('ConfigSchema', () => {
     expect(() => ConfigSchema.parse(ok)).not.toThrow()
   })
 
+  it('avviser en terskel som ikke er en tokenmengde', () => {
+    // z.string() godtok 'femti' og '50,5', og begge kastet en rå SyntaxError
+    // fra BigInt() inne i Observer-konstruktøren — etter oppstart, langt fra
+    // årsaken.
+    for (const bad of ['femti', '50,5', '', '-1', '1.2.3', '0x10']) {
+      const cfg = structuredClone(DEFAULT_CONFIG)
+      cfg.strategy.minTradeSizeQuote = bad
+      expect(() => ConfigSchema.parse(cfg), bad).toThrow()
+    }
+  })
+
+  it('godtar tokenmengder med og uten desimaler', () => {
+    for (const ok of ['0', '50', '0.5', '10000.000001']) {
+      const cfg = structuredClone(DEFAULT_CONFIG)
+      cfg.strategy.minSwingVolumeQuote = ok
+      expect(() => ConfigSchema.parse(cfg), ok).not.toThrow()
+    }
+  })
+
   it('avviser ukjente nøkler', () => {
     const bad = { ...structuredClone(DEFAULT_CONFIG), tullball: 1 }
     expect(() => ConfigSchema.parse(bad)).toThrow()

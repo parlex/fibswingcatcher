@@ -19,6 +19,7 @@ const pool: PoolMeta = {
 function observer(
   overrides: Partial<typeof DEFAULT_CONFIG.strategy> = {},
   dataOverrides: Partial<typeof DEFAULT_CONFIG.data> = {},
+  extra: { spotPrice?: () => Promise<string> } = {},
 ) {
   const db = openDb(':memory:')
   migrate(db)
@@ -32,22 +33,76 @@ function observer(
   const obs = new Observer({
     pool, label: 'TEST/WETH', config, setups, notifier,
     log: { info: () => {}, warn: () => {}, error: () => {} },
+    ...extra,
   })
   return { obs, setups, notifier, db, config }
 }
 
-let n = 0
-const trade = (ts: number, price: number): Trade => ({
-  ts, txHash: `0x${++n}`, logIndex: n, priceQuote: String(price),
-  sizeQuote: 1_000_000n, sizeBase: 1n, side: 'buy',
-})
-
-/** Bygger et impulsbein fra 100 til 200 over ti timer, så et retracement. */
-async function feedImpulse(obs: Observer) {
-  for (let i = 1; i <= 10; i++) await obs.onTrade(trade(i * H, 100 + i * 10))
-  // ny bar med lavere pris bekrefter beinet
-  await obs.onTrade(trade(11 * H, 195))
+/** Som `observer()`, men med standardkonfigurasjonen ordrett — ingen nullede
+ *  terskler. Brukes til å vise at spec 6.7 faktisk holder som levert. */
+function observerWithDefaults() {
+  const db = openDb(':memory:')
+  migrate(db)
+  const setups = new SetupStore(db)
+  const notifier = new NullNotifier()
+  const obs = new Observer({
+    pool, label: 'TEST/WETH', config: DEFAULT_CONFIG, setups, notifier,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  })
+  return { obs, setups, notifier, db }
 }
+
+const ONE = 10n ** 18n   // én hel quote-token, siden fixture-poolen har 18 desimaler
+
+let n = 0
+const trade = (ts: number, price: number, sizeQuote = ONE): Trade => {
+  n += 1
+  return {
+    ts,
+    txHash: `0x${n.toString(16).padStart(8, '0')}`,
+    // Bevisst en annen formel enn txHash: felt som er like skjuler en
+    // ombytting av dem, og det har dukket opp fem ganger i denne grenen.
+    logIndex: (n * 3 + 1) % 97,
+    priceQuote: String(price),
+    sizeQuote,
+    sizeBase: ONE,
+    side: 'buy',
+    liquidity: 1_000_000n * ONE,
+  }
+}
+
+/**
+ * Bygger en bar av flere handler der toppen kommer *sist*.
+ *
+ * Dette er regimet en ekte pool alltid er i, og det er nettopp det ingen
+ * fixture i denne grenen hadde: alle matet én handel per bar, så en bar hvis
+ * topp stiger etter første handel fantes ikke i noen test. Deteksjonen kjørte
+ * derfor på en bar som holdt én pris, og fib-nivåene ble tegnet fra den.
+ */
+async function feedBar(obs: Observer, barIndex: number, prices: number[]) {
+  const step = Math.floor(H / (prices.length + 1))
+  for (const [i, price] of prices.entries()) {
+    await obs.onTrade(trade(barIndex * H + i * step, price))
+  }
+}
+
+/**
+ * Bygger et impulsbein 110 → 200, med bunnen som en *indre* pivot.
+ *
+ * Bar 1 ligger høyere enn bunnen på bar 2 med vilje: deteksjonen nekter å
+ * forankre et oppsett på den eldste beholdte baren, siden en vinduskant ikke
+ * er en pivot. Bar 12 finnes for å lukke bar 11 — strukturklokken ser bare
+ * lukkede bars.
+ */
+async function feedImpulse(obs: Observer, size = ONE) {
+  await obs.onTrade(trade(1 * H, 130, size))
+  await obs.onTrade(trade(2 * H, 110, size))
+  for (let i = 3; i <= 11; i++) await obs.onTrade(trade(i * H, 110 + (i - 2) * 10, size))
+  await obs.onTrade(trade(12 * H, 195, size))
+}
+
+/** Første bar etter at `feedImpulse` har lukket beinet. */
+const AFTER = 13 * H
 
 describe('Observer', () => {
   it('lager ikke oppsett før et bein er bekreftet', async () => {
@@ -66,7 +121,7 @@ describe('Observer', () => {
   it('varsler ved 0.618 når prisen retracer', async () => {
     const { obs, notifier } = observer()
     await feedImpulse(obs)
-    await obs.onTrade(trade(12 * H, 137))
+    await obs.onTrade(trade(AFTER, 137))
     const levels = notifier.sent.filter((a) => a.kind === 'milestone').map((a) => a.level)
     expect(levels).toContain(0.5)
     expect(levels).toContain(0.618)
@@ -75,8 +130,8 @@ describe('Observer', () => {
   it('varsler ikke om samme nivå to ganger', async () => {
     const { obs, notifier } = observer()
     await feedImpulse(obs)
-    await obs.onTrade(trade(12 * H, 137))
-    await obs.onTrade(trade(12 * H + 1000, 136))
+    await obs.onTrade(trade(AFTER, 137))
+    await obs.onTrade(trade(AFTER + 1000, 136))
     const count = notifier.sent.filter((a) => a.kind === 'milestone' && a.level === 0.618).length
     expect(count).toBe(1)
   })
@@ -84,18 +139,55 @@ describe('Observer', () => {
   it('fanger en berøring av sonen som varer én handel', async () => {
     const { obs, notifier } = observer()
     await feedImpulse(obs)
-    await obs.onTrade(trade(12 * H, 137))
-    await obs.onTrade(trade(12 * H + 1_000, 125))   // wick ned i sonen (120.26–129.26)
-    await obs.onTrade(trade(12 * H + 11_000, 140))  // og ut igjen
+    await obs.onTrade(trade(AFTER, 137))
+    await obs.onTrade(trade(AFTER + 1_000, 125))   // wick ned i sonen (120.26–129.26)
+    await obs.onTrade(trade(AFTER + 11_000, 140))  // og ut igjen
     expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
   })
 
-  it('ugyldiggjør oppsettet når prisen bryter under swing low', async () => {
+  it('ugyldiggjør oppsettet når en bar lukker under swing low', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
-    await obs.onTrade(trade(12 * H, 95))
+    await obs.onTrade(trade(AFTER, 95))
+    // Baren har ikke lukket ennå — oppsettet står
+    expect(setups.allActive()).toHaveLength(1)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(false)
+
+    await obs.onTrade(trade(AFTER + H, 96))   // lukker baren på 95
     expect(setups.allActive()).toEqual([])
     expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(true)
+  })
+
+  it('ett wick under swing low ødelegger ikke oppsettet', async () => {
+    // Spec 2.4, og tredje ben i støvhandel-angrepet: prisen må *lukke* under
+    // bunnen. Wicket ned og opp igjen innenfor samme bar teller ikke.
+    const { obs, setups, notifier } = observer()
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 1))              // absurd wick
+    await obs.onTrade(trade(AFTER + 1_000, 140))    // og ut igjen
+    await obs.onTrade(trade(AFTER + H, 140))        // baren lukker på 140
+    expect(setups.allActive()).toHaveLength(1)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(false)
+  })
+
+  it('tegner nivåene fra barens ekte topp, ikke fra første handel i den', async () => {
+    // C3: deteksjonen kjørte på en bar som holdt én pris. Satte den handelen en
+    // ny topp, ble beinets `high` det ene printet — og siden oppsett-id-en er
+    // `pool-lowTs-highTs` ga en senere deteksjon samme id, så nivåene ble
+    // aldri regnet om. Her stiger toppen *etter* første handel i baren.
+    const { obs, setups } = observer()
+    await feedBar(obs, 1, [130])
+    await feedBar(obs, 2, [110])
+    for (let i = 3; i <= 10; i++) await feedBar(obs, i, [110 + (i - 2) * 10])
+    // Bar 11 åpner på 150 og topper på 200 — første handel er ikke toppen
+    await feedBar(obs, 11, [150, 170, 200, 185])
+    await feedBar(obs, 12, [195])
+
+    const setup = setups.allActive()[0]!
+    expect(setup.swing.high).toBe('200')
+    // Sonen skal være regnet fra 200, ikke fra 150
+    expect(setup.levels.zoneTop).toBeCloseTo(200 - 0.786 * 90, 6)
+    expect(setup.levels.zoneBottom).toBeCloseTo(200 - 0.886 * 90, 6)
   })
 
   it('varsler om degradert drift og igjen når den er tilbake', async () => {
@@ -109,7 +201,7 @@ describe('Observer', () => {
     const { obs, setups } = observer()
     await feedImpulse(obs)
     const first = setups.allActive()[0]!
-    for (let i = 12; i <= 14; i++) await obs.onTrade(trade(i * H, 200 + i * 10))
+    for (let i = 13; i <= 16; i++) await obs.onTrade(trade(i * H, 200 + i * 10))
     const active = setups.allActive()
     expect(active).toHaveLength(1)
     expect(active[0]!.id).not.toBe(first.id)
@@ -117,7 +209,7 @@ describe('Observer', () => {
   })
 
   it('ignorerer handler under minTradeSizeQuote', async () => {
-    const { obs, setups } = observer({ minTradeSizeQuote: '2000000' })
+    const { obs, setups } = observer({ minTradeSizeQuote: '2' })
     await feedImpulse(obs)
     expect(setups.allActive()).toEqual([])
   })
@@ -125,16 +217,37 @@ describe('Observer', () => {
   it('en replayet handel i sonen rører ikke tilstanden og varsler ikke', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
-    await obs.replay(trade(12 * H, 125))   // midt i sonen 120.26–129.26
+    await obs.replay(trade(AFTER, 125))   // midt i sonen 120.26–129.26
     expect(setups.allActive()[0]!.state).toBe('DETECTED')
+    expect(notifier.sent).toEqual([])
+  })
+
+  it('replay setter strukturelle sluttilstander, men annonserer dem ikke', async () => {
+    // I12: et strukturbrudd fra før oppstart er et faktum om historikken,
+    // like mye som superseder-EXPIRED vi alt tillater. Nektet vi det,
+    // overlevde det døde oppsettet replayen og sendte «oppsett ugyldig» til
+    // låseskjermen på første levende handel.
+    const { obs, setups, notifier } = observer()
+    await feedImpulse(obs)
+    const id = setups.allActive()[0]!.id
+
+    await obs.replay(trade(AFTER, 95))
+    await obs.replay(trade(AFTER + H, 96))   // lukker baren under swing low
+
+    expect(setups.get(id)!.state).toBe('INVALIDATED')
+    expect(setups.allActive()).toEqual([])
+    expect(notifier.sent).toEqual([])
+
+    // Og ingenting lekker ut på første levende handel etterpå
+    await obs.onTrade(trade(AFTER + 2 * H, 97))
     expect(notifier.sent).toEqual([])
   })
 
   it('en levende handel i sonen etter replay gir TRIGGERED og et varsel', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
-    await obs.replay(trade(12 * H, 125))
-    await obs.onTrade(trade(12 * H + 1_000, 125))
+    await obs.replay(trade(AFTER, 125))
+    await obs.onTrade(trade(AFTER + 1_000, 125))
     expect(setups.allActive()[0]!.state).toBe('TRIGGERED')
     expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
   })
@@ -142,17 +255,19 @@ describe('Observer', () => {
   it('replay primer alertsSent uten å sende noe — og hindrer dobbeltvarsel etterpå', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
-    await obs.replay(trade(12 * H, 137))
+    await obs.replay(trade(AFTER, 137))
     expect(setups.allActive()[0]!.alertsSent).toEqual([0.5, 0.618])
     expect(notifier.sent).toEqual([])
-    await obs.onTrade(trade(12 * H + 1_000, 137))
+    await obs.onTrade(trade(AFTER + 1_000, 137))
     expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
   })
 
   it('replay bygger struktur — oppsettet oppstår av replayede handler alene', async () => {
     const { obs, setups } = observer()
-    for (let i = 1; i <= 10; i++) await obs.replay(trade(i * H, 100 + i * 10))
-    await obs.replay(trade(11 * H, 195))
+    await obs.replay(trade(1 * H, 130))
+    await obs.replay(trade(2 * H, 110))
+    for (let i = 3; i <= 11; i++) await obs.replay(trade(i * H, 110 + (i - 2) * 10))
+    await obs.replay(trade(12 * H, 195))
     expect(setups.allActive()).toHaveLength(1)
   })
 
@@ -178,7 +293,9 @@ describe('Observer', () => {
     const { obs, setups, notifier } = observer()
     // Samme impulsbein som feedImpulse, men forskjøvet til bar 100 slik at det
     // finnes plass til noe som er «eldre enn vinduet» uten negativ tid.
-    for (let i = 100; i <= 110; i++) await obs.onTrade(trade(i * H, 100 + (i - 100) * 10))
+    await obs.onTrade(trade(100 * H, 130))
+    await obs.onTrade(trade(101 * H, 110))
+    for (let i = 102; i <= 110; i++) await obs.onTrade(trade(i * H, 110 + (i - 101) * 10))
     await obs.onTrade(trade(111 * H, 195))
 
     const setupsBefore = setups.allActive()
@@ -195,12 +312,12 @@ describe('Observer', () => {
   })
 
   it('klipping endrer ingenting for en sekvens som passer i vinduet', async () => {
-    const seq: Trade[] = []
-    for (let i = 1; i <= 10; i++) seq.push(trade(i * H, 100 + i * 10))
-    seq.push(trade(11 * H, 195))
-    seq.push(trade(12 * H, 137))
-    seq.push(trade(12 * H + 1_000, 125))
-    seq.push(trade(12 * H + 11_000, 140))
+    const seq: Trade[] = [trade(1 * H, 130), trade(2 * H, 110)]
+    for (let i = 3; i <= 11; i++) seq.push(trade(i * H, 110 + (i - 2) * 10))
+    seq.push(trade(12 * H, 195))
+    seq.push(trade(AFTER, 137))
+    seq.push(trade(AFTER + 1_000, 125))
+    seq.push(trade(AFTER + 11_000, 140))
 
     const bounded = observer()
     const unbounded = observer({}, { backfillLookbackBars: 100_000 })
@@ -219,7 +336,7 @@ describe('Observer', () => {
   it('overlever omstart — en ny observatør over samme base varsler ikke på nytt', async () => {
     const first = observer()
     await feedImpulse(first.obs)
-    await first.obs.onTrade(trade(12 * H, 137))
+    await first.obs.onTrade(trade(AFTER, 137))
     const before = first.setups.allActive()[0]!
     expect(before.alertsSent).toEqual([0.5, 0.618])
     expect(first.notifier.sent.filter((a) => a.kind === 'milestone')).toHaveLength(2)
@@ -234,22 +351,35 @@ describe('Observer', () => {
     expect(setups.allActive()[0]!.alertsSent).toEqual([0.5, 0.618])
 
     // Slik main.ts starter opp: historikken gjennom replay(), så levende
-    for (let i = 1; i <= 10; i++) await restarted.replay(trade(i * H, 100 + i * 10))
-    await restarted.replay(trade(11 * H, 195))
-    await restarted.replay(trade(12 * H, 137))
+    await restarted.replay(trade(1 * H, 130))
+    await restarted.replay(trade(2 * H, 110))
+    for (let i = 3; i <= 11; i++) await restarted.replay(trade(i * H, 110 + (i - 2) * 10))
+    await restarted.replay(trade(12 * H, 195))
+    await restarted.replay(trade(AFTER, 137))
     expect(notifier.sent).toEqual([])
 
-    await restarted.onTrade(trade(12 * H + 1_000, 137))
+    await restarted.onTrade(trade(AFTER + 1_000, 137))
     expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
   })
 
-  it('re-forankrer ikke på vinduskanten når bunnen glir ut av vinduet', async () => {
-    // Stigende bein over 60 bars. Bunnen ble satt på bar 1 og har for lengst
-    // forlatt 24-bars vinduet. Uten avvisningen av kantforankring ville
-    // detectSwings satt en ny kandidatbunn på bars[0] for hver bar, og hvert
-    // steg ville blitt et nytt oppsett.
+  it('nekter å forankre på vinduskanten, også ved kaldstart', async () => {
+    // Monotont stigende bein fra første bar: kandidatbunnen er alltid
+    // `bars[0]`, som er en vinduskant. Ved kaldstart er det et blokknummer
+    // valgt av et takt-anslag, altså det mest vilkårlige punktet som finnes —
+    // ikke det minst. Da lages ingen oppsett, og det er riktig.
     const { obs, setups } = observer()
     for (let i = 1; i <= 60; i++) await obs.onTrade(trade(i * H, 100 + i * 5))
+    expect(setups.allActive()).toEqual([])
+  })
+
+  it('beholder oppsettet når bunnen glir ut av vinduet, uten å re-forankre', async () => {
+    // Bunnen er en indre pivot på bar 2 og har for lengst forlatt 24-bars
+    // vinduet. Uten avvisningen av kantforankring ville detectSwings satt en
+    // ny kandidatbunn på bars[0] for hver bar, og hvert steg blitt et oppsett.
+    const { obs, setups } = observer()
+    await obs.onTrade(trade(1 * H, 200))
+    await obs.onTrade(trade(2 * H, 100))
+    for (let i = 3; i <= 60; i++) await obs.onTrade(trade(i * H, 100 + (i - 2) * 5))
 
     const active = setups.allActive()
     expect(active).toHaveLength(1)
@@ -262,8 +392,9 @@ describe('Observer', () => {
     // sonen. Sekvensen er lengre enn 24-bars vinduet, så bars[0] glir.
     const { obs, setups, notifier } = observer()
     const price = (i: number) => {
-      if (i <= 3) return 100
-      if (i <= 15) return 100 + (i - 3) * 8.5   // 100 -> 202
+      if (i === 1) return 140                    // høyere start, så bunnen blir en indre pivot
+      if (i <= 3) return 100                     // ekte bunn
+      if (i <= 15) return 100 + (i - 3) * 8.5    // 100 -> 202
       return 190                                 // sidelengs, godt over sonen
     }
     for (let i = 1; i <= 50; i++) await obs.onTrade(trade(i * H, price(i)))
@@ -274,8 +405,9 @@ describe('Observer', () => {
 
   it('et treg bein etterfulgt av retracement gir ett oppsett, ikke atten', async () => {
     const { obs, setups, notifier } = observer()
-    for (let i = 1; i <= 40; i++) await obs.onTrade(trade(i * H, 100 + (i - 1) * 2.5)) // 100 -> 197.5
-    for (let i = 41; i <= 45; i++) await obs.onTrade(trade(i * H, 180))
+    await obs.onTrade(trade(1 * H, 140))   // høyere start, så bunnen blir en indre pivot
+    for (let i = 2; i <= 41; i++) await obs.onTrade(trade(i * H, 100 + (i - 2) * 2.5)) // 100 -> 197.5
+    for (let i = 42; i <= 46; i++) await obs.onTrade(trade(i * H, 180))
     expect(setups.allActive()).toHaveLength(1)
     expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
   })
@@ -319,7 +451,7 @@ describe('Observer', () => {
     expect(shared.notifier.sent).toEqual([])
 
     // Pool B handler på en helt annen prisskala — under pool A sin swing low
-    await obsB.onTrade(trade(12 * H, 0.0001))
+    await obsB.onTrade(trade(AFTER, 0.0001))
 
     expect(shared.setups.activeForPool(pool.address)).toEqual(before)
     expect(shared.notifier.sent.filter((a) => 'setup' in a && a.setup.poolAddress === pool.address))
@@ -357,16 +489,91 @@ describe('Observer', () => {
     expect(notifier.sent.map((a) => a.kind)).toEqual(['degraded'])
   })
 
+  it('en støvhandel under terskelen ødelegger ikke et gyldig oppsett', async () => {
+    // Spec 6.7 mottiltak 1, med standardkonfigurasjonen ordrett. Tersklene er
+    // skrevet i quote-token, og skaleres med tokenets desimaler før de
+    // sammenlignes med rå kjede-enheter. Uten skaleringen er '50' femti wei,
+    // og da slipper denne handelen gjennom og river oppsettet.
+    const { obs, setups, notifier } = observerWithDefaults()
+    // 2 000 quote-token per handel, så beinet passerer minSwingVolumeQuote
+    // (10 000) og hver handel passerer minTradeSizeQuote (50)
+    await feedImpulse(obs, 2_000n * ONE)
+    expect(setups.allActive()).toHaveLength(1)
+
+    // 100 wei, som printer prisen 1 — nøyaktig angrepet
+    await obs.onTrade(trade(AFTER, 1, 100n))
+    await obs.onTrade(trade(AFTER + H, 1, 100n))
+
+    expect(setups.allActive()).toHaveLength(1)
+    expect(notifier.sent).toEqual([])
+  })
+
+  it('skalerer tersklene med quote-tokenets desimaler', async () => {
+    // 6 desimaler (USDC-aktig) og 18 (WETH-aktig) må gi samme *mening*
+    for (const [decimals, oneToken] of [[6, 10n ** 6n], [18, 10n ** 18n]] as const) {
+      const db = openDb(':memory:')
+      migrate(db)
+      const setups = new SetupStore(db)
+      const quotePool: PoolMeta = { ...pool, decimals0: decimals, decimals1: decimals }
+      const obs = new Observer({
+        pool: quotePool, label: 'T', config: DEFAULT_CONFIG, setups,
+        notifier: new NullNotifier(),
+        log: { info: () => {}, warn: () => {}, error: () => {} },
+      })
+      // minTradeSizeQuote er '50': 49 tokens skal falle, 51 skal telle
+      await obs.onTrade(trade(1 * H, 130, 49n * oneToken))
+      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(0)
+      await obs.onTrade(trade(1 * H, 130, 51n * oneToken))
+      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(1)
+    }
+  })
+
+  it('nekter en tilstandsendring når spotprisen spriker fra handelsprisen', async () => {
+    // Spec 6.7 mottiltak 2: én uavhengig lesning av poolens egen pris, bare
+    // ved tilstandsendringer.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '190' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))   // midt i sonen, men spot sier 190
+
+    expect(setups.allActive()[0]!.state).toBe('DETECTED')
+    expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(false)
+  })
+
+  it('slipper gjennom når spotprisen bekrefter handelsprisen', async () => {
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '124.5' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+
+    expect(setups.allActive()[0]!.state).toBe('TRIGGERED')
+    expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
+  })
+
+  it('stoler på handelsprisen når spotoppslaget feiler', async () => {
+    const { obs, setups } = observer({}, {}, {
+      spotPrice: async () => { throw new Error('RPC nede') },
+    })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+    expect(setups.allActive()[0]!.state).toBe('TRIGGERED')
+  })
+
+  it('leser ikke spotprisen for et milepælsvarsel', async () => {
+    let reads = 0
+    const { obs } = observer({}, {}, {
+      spotPrice: async () => { reads += 1; return '137' },
+    })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 137))   // krysser 0.5 og 0.618, ingen overgang
+    expect(reads).toBe(0)
+  })
+
   it('en støvhandel i sonen trigger ingenting', async () => {
-    const { obs, setups, notifier } = observer({ minTradeSizeQuote: '1000' })
+    const { obs, setups, notifier } = observer({ minTradeSizeQuote: '1' })
     await feedImpulse(obs)
     expect(setups.allActive()).toHaveLength(1)
 
     // Midt i sonen 120.26–129.26, men under minTradeSizeQuote
-    await obs.onTrade({
-      ts: 12 * H, txHash: '0xdust', logIndex: 999, priceQuote: '125',
-      sizeQuote: 999n, sizeBase: 1n, side: 'buy',
-    })
+    await obs.onTrade(trade(AFTER, 125, ONE - 1n))
 
     expect(setups.allActive()[0]!.state).toBe('DETECTED')
     expect(notifier.sent).toEqual([])
@@ -399,7 +606,7 @@ describe('Observer', () => {
     expect(setups.allActive()[0]!.alertsSent).toEqual([])
 
     // To uavventede kall til samme pris, kjørt samtidig
-    await Promise.all([obs.onTrade(trade(12 * H, 137)), obs.onTrade(trade(12 * H, 137))])
+    await Promise.all([obs.onTrade(trade(AFTER, 137)), obs.onTrade(trade(AFTER, 137))])
 
     expect(sent.filter((k) => k === 'milestone0.618')).toHaveLength(1)
     expect(sent.filter((k) => k === 'milestone0.5')).toHaveLength(1)

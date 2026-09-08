@@ -41,7 +41,7 @@ export function priceFromSqrtX96(sqrtPriceX96: bigint, meta: PoolMeta): string {
 }
 
 export function decodeSwapLog(log: RawLog, meta: PoolMeta, blockTs: number): Trade {
-  const [amount0, amount1, sqrtPriceX96] = decodeAbiParameters(SWAP_ARGS, log.data as Hex)
+  const [amount0, amount1, sqrtPriceX96, liquidity] = decodeAbiParameters(SWAP_ARGS, log.data as Hex)
 
   const amountBase = meta.baseIsToken0 ? amount0 : amount1
   const amountQuote = meta.baseIsToken0 ? amount1 : amount0
@@ -56,5 +56,6 @@ export function decodeSwapLog(log: RawLog, meta: PoolMeta, blockTs: number): Tra
     sizeQuote: abs(amountQuote),
     // Base forlater poolen (negativ) = noen kjøpte base
     side: amountBase < 0n ? 'buy' : 'sell',
+    liquidity,
   }
 }

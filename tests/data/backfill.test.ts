@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters } from 'viem'
 import { backfillTrades } from '../../src/data/backfill.js'
+import { isResultLimitError } from '../../src/data/viem.js'
 import type { PoolMeta } from '../../src/data/pool.js'
 
 const meta: PoolMeta = {
@@ -131,7 +132,9 @@ describe('backfillTrades ved rate-limiting', () => {
 
 describe('backfillTrades ved for mange treff', () => {
   const tooMany = () => new Error('logs matched by query exceeds limit of 10000')
-  const splittable = (e: unknown) => /exceeds limit/.test((e as Error).message)
+  // Den ekte regelen, ikke en kopi av den. En håndkopiert predikat her ville
+  // bare bekreftet kopien og latt originalen være fri til å ta feil.
+  const splittable = isResultLimitError
 
   it('deler vinduet i to når det ga for mange treff', async () => {
     const asked: string[] = []
