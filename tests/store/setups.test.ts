@@ -59,6 +59,61 @@ describe('SetupStore', () => {
   it('gir undefined for ukjent id', () => {
     expect(store().setups.get('finnes-ikke')).toBeUndefined()
   })
+
+  it('utelater alle fire terminale tilstander fra allActive', () => {
+    const { setups } = store()
+    // Active setup (DETECTED)
+    const active = createSetup(POOL, swing, FIB, 1000)
+    // Terminal setups - each with a distinct swing to avoid ID collision
+    const closed = { ...createSetup(POOL, { ...swing, lowTs: 1 }, FIB, 1000), state: 'CLOSED' as const }
+    const invalidated = { ...createSetup(POOL, { ...swing, lowTs: 2 }, FIB, 1000), state: 'INVALIDATED' as const }
+    const expired = { ...createSetup(POOL, { ...swing, lowTs: 3 }, FIB, 1000), state: 'EXPIRED' as const }
+    const rejected = { ...createSetup(POOL, { ...swing, lowTs: 4 }, FIB, 1000), state: 'REJECTED' as const }
+
+    setups.upsert(active)
+    setups.upsert(closed)
+    setups.upsert(invalidated)
+    setups.upsert(expired)
+    setups.upsert(rejected)
+
+    const active_ids = setups.allActive().map((s) => s.id)
+    expect(active_ids).toEqual([active.id])
+    expect(active_ids).not.toContain(closed.id)
+    expect(active_ids).not.toContain(invalidated.id)
+    expect(active_ids).not.toContain(expired.id)
+    expect(active_ids).not.toContain(rejected.id)
+  })
+
+  it('sorterer alerter i stigende rekkefølge', () => {
+    const { setups } = store()
+    const s = createSetup(POOL, swing, FIB, 1000)
+    setups.upsert(s)
+    // Record in non-ascending order: 0.786, then 0.5, then 0.618
+    setups.recordAlert(s.id, 0.786)
+    setups.recordAlert(s.id, 0.5)
+    setups.recordAlert(s.id, 0.618)
+    expect(setups.get(s.id)!.alertsSent).toEqual([0.5, 0.618, 0.786])
+  })
+
+  it('migrate er idempotent og bevarer skjema', () => {
+    const { setups, watchlist } = store()
+    // Call migrate again on the same database
+    const db = openDb(':memory:')
+    migrate(db)
+    migrate(db) // Second call should not throw
+
+    // Verify schema is intact by writing and reading data
+    const setupStore = new SetupStore(db)
+    const watchlistStore = new WatchlistStore(db)
+
+    const s = createSetup(POOL, swing, FIB, 1000)
+    setupStore.upsert(s)
+    expect(setupStore.get(s.id)).toEqual(s)
+
+    const e = { poolAddress: POOL, quoteToken: POOL, label: 'TEST/WETH', addedAtTs: 1 }
+    watchlistStore.add(e)
+    expect(watchlistStore.all()).toEqual([e])
+  })
 })
 
 describe('WatchlistStore', () => {
