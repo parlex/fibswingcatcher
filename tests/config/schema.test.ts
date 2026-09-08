@@ -31,6 +31,19 @@ describe('ConfigSchema', () => {
     expect(() => ConfigSchema.parse(bad)).toThrow(/fibZoneTop/)
   })
 
+  it('avviser et strukturvindu som er for lite for deteksjon', () => {
+    // 1 bar lot deteksjonen være lydløst død: detectSwings trenger én bar til
+    // bunnen, én til bekreftelsen, og én til vinduskanten den nekter å
+    // forankre i.
+    const bad = structuredClone(DEFAULT_CONFIG)
+    bad.data.backfillLookbackBars = 1
+    expect(() => ConfigSchema.parse(bad)).toThrow()
+
+    const ok = structuredClone(DEFAULT_CONFIG)
+    ok.data.backfillLookbackBars = 4
+    expect(() => ConfigSchema.parse(ok)).not.toThrow()
+  })
+
   it('avviser ukjente nøkler', () => {
     const bad = { ...structuredClone(DEFAULT_CONFIG), tullball: 1 }
     expect(() => ConfigSchema.parse(bad)).toThrow()
