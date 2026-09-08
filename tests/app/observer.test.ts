@@ -157,22 +157,40 @@ describe('Observer', () => {
 
   it('handelsbufferet stabiliserer seg i stedet for å vokse uten tak', async () => {
     const { obs } = observer()
-    // Vinduet er backfillLookbackBars (24) bars, barjustert → 25 bars beholdes.
-    for (let i = 1; i <= 200; i++) await obs.onTrade(trade(i * H, 100 + (i % 5)))
+    // To handler per bar, én på barstart og én midt i baren. Vinduet er
+    // backfillLookbackBars (24) bars og kanten justeres ned til en barstart,
+    // så 25 hele bars × 2 handler = 50 beholdes.
+    const feed = async (from: number, to: number) => {
+      for (let i = from; i <= to; i++) {
+        await obs.onTrade(trade(i * H, 100 + (i % 5)))
+        await obs.onTrade(trade(i * H + H / 2, 100 + (i % 5)))
+      }
+    }
+    await feed(1, 200)
     const steady = obs.bufferedTrades
-    expect(steady).toBe(25)
-    for (let i = 201; i <= 400; i++) await obs.onTrade(trade(i * H, 100 + (i % 5)))
+    expect(steady).toBe(50)
+    await feed(201, 400)
     expect(obs.bufferedTrades).toBe(steady)
   })
 
-  it('forkaster en handel som er eldre enn vinduet', async () => {
-    const { obs } = observer()
-    await obs.onTrade(trade(100 * H, 100))
-    expect(obs.bufferedTrades).toBe(1)
-    await obs.onTrade(trade(50 * H, 100))   // 50 bars tilbake — utenfor vinduet
-    expect(obs.bufferedTrades).toBe(1)
-    await obs.onTrade(trade(99 * H, 100))   // innenfor vinduet
-    expect(obs.bufferedTrades).toBe(2)
+  it('forkaster en handel eldre enn vinduet — verken husket eller evaluert', async () => {
+    const { obs, setups, notifier } = observer()
+    // Samme impulsbein som feedImpulse, men forskjøvet til bar 100 slik at det
+    // finnes plass til noe som er «eldre enn vinduet» uten negativ tid.
+    for (let i = 100; i <= 110; i++) await obs.onTrade(trade(i * H, 100 + (i - 100) * 10))
+    await obs.onTrade(trade(111 * H, 195))
+
+    const setupsBefore = setups.allActive()
+    const buffered = obs.bufferedTrades
+    expect(setupsBefore).toHaveLength(1)
+
+    // 61 bars tilbake, langt utenfor 24-bars vinduet, til en pris godt under
+    // swing low — den ville ugyldiggjort oppsettet om den ble evaluert.
+    await obs.onTrade(trade(50 * H, 10))
+
+    expect(obs.bufferedTrades).toBe(buffered)
+    expect(setups.allActive()).toEqual(setupsBefore)
+    expect(notifier.sent).toEqual([])
   })
 
   it('klipping endrer ingenting for en sekvens som passer i vinduet', async () => {
