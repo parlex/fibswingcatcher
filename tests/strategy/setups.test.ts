@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Swing } from '../../src/domain/types.js'
+import { fibLevels } from '../../src/strategy/fib.js'
 import { createSetup, evaluateSetup } from '../../src/strategy/setups.js'
 
 const H = 3_600_000
@@ -68,14 +69,53 @@ describe('evaluateSetup', () => {
     expect(tr.state).toBe('EXPIRED')
   })
 
+  it('er ikke EXPIRED nøyaktig på maxSetupAgeBars-grensen', () => {
+    const tr = evaluateSetup(setup(), ctx(190, 10 * H + 48 * H))
+    expect(tr.state).toBe('DETECTED')
+  })
+
   it('går til REJECTED når RR i sonen er under minRR', () => {
     const tr = evaluateSetup(setup(), { ...ctx(115), minRR: 99 })
     expect(tr.state).toBe('REJECTED')
     expect(tr.reason).toMatch(/RR/)
   })
 
-  it('prioriterer ugyldiggjøring over trigger når begge kunne gjelde', () => {
+  it('bruker faktisk pris, ikke zoneBottom, i RR-beregningen', () => {
+    // rrAt(115, sl=98, 60) ≈ 4.06 (REJECTED at minRR 4.5),
+    // rrAt(zoneBottom=111.4, sl=98, 60) ≈ 4.99 (would be TRIGGERED at minRR 4.5)
+    const tr = evaluateSetup(setup(), { ...ctx(115), minRR: 4.5 })
+    expect(tr.state).toBe('REJECTED')
+  })
+
+  it('ugyldiggjør når prisen er godt under swing low', () => {
     const tr = evaluateSetup(setup(), ctx(97))
     expect(tr.state).toBe('INVALIDATED')
+  })
+
+  it('zoneBottom er alltid over swing low, for enhver gyldig fibEntry', () => {
+    // fibEntry er begrenset til (0, 1) i config-skjemaet. Siden
+    // zoneBottom = high - fibEntry * range, og swing.low < high, er
+    // zoneBottom strukturelt alltid over swing low — invalidering og
+    // trigger kan derfor aldri kollidere, uavhengig av sjekkrekkefølge.
+    const swingLow = Number(swing.low)
+    for (const fibEntry of [0.5, 0.786, 0.886, 0.99]) {
+      const levels = fibLevels(swing, {
+        fibEntry, fibZoneTop: fibEntry - 0.1, slBufferPct: 2, alertLevels: [],
+      })
+      expect(levels.zoneBottom).toBeGreaterThan(swingLow)
+    }
+  })
+
+  it('blir ikke TRIGGERED i gapet mellom swing low og zoneBottom', () => {
+    // Med standardfixturen er zoneBottom 111.4. En pris i (100, 111.4)
+    // skal verken ugyldiggjøre eller trigge.
+    const tr = evaluateSetup(setup(), ctx(105))
+    expect(tr.state).toBe('DETECTED')
+  })
+
+  it('bevarer en ikke-DETECTED tilstand når ingenting endres', () => {
+    const s = { ...setup(), state: 'ARMED' as const }
+    const tr = evaluateSetup(s, ctx(190))
+    expect(tr.state).toBe('ARMED')
   })
 })
