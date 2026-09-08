@@ -51,10 +51,44 @@ export class SetupStore {
     return rows.map(toSetup)
   }
 
-  recordAlert(id: string, level: number): void {
+  /**
+   * Aktive oppsett for én pool.
+   *
+   * Finnes fordi flere observatører deler én base — én per pool i
+   * watchlisten. `allActive()` filtrerer bare på tilstand, så en observatør
+   * som brukte den ville evaluert *alle* poolers oppsett mot sin egen pris,
+   * på en helt annen prisskala. Begrensningen hører i spørringen, ikke hos
+   * kalleren.
+   *
+   * `COLLATE NOCASE` fordi adresser skrives både med og uten sjekksum-store
+   * bokstaver, og en pool er den samme poolen uansett.
+   */
+  activeForPool(poolAddress: Hex): Setup[] {
+    const placeholders = TERMINAL.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM setups
+        WHERE pool_address = ? COLLATE NOCASE AND state NOT IN (${placeholders})
+        ORDER BY created_at_ts
+      `)
+      .all(poolAddress, ...TERMINAL) as Row[]
+    return rows.map(toSetup)
+  }
+
+  /**
+   * Registrerer at et fib-nivå er varslet.
+   *
+   * Returnerer `true` bare når nivået faktisk ble lagt til. Kalleren skal sende
+   * varselet kun da: better-sqlite3 er synkron, så to samtidige
+   * `onTrade`-kall som beregnet samme `newAlerts` før første `await` kan ikke
+   * begge få `true` her. Det gjør dobbeltvarsling umulig uavhengig av
+   * serialiseringen i `main.ts`.
+   */
+  recordAlert(id: string, level: number): boolean {
     const s = this.get(id)
-    if (!s || s.alertsSent.includes(level)) return
+    if (!s || s.alertsSent.includes(level)) return false
     this.upsert({ ...s, alertsSent: [...s.alertsSent, level].sort((a, b) => a - b) })
+    return true
   }
 }
 

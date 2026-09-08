@@ -27,13 +27,23 @@ export const DataSchema = z.object({
   /**
    * Strukturvinduet, målt i bars på strukturtidsrammen.
    *
-   * Styrer to ting, med vilje samme tall: hvor mye historikk backfillen henter
-   * ved oppstart, og hvor mange bars observatøren holder i sitt rullende
-   * handelsbuffer. Eksplisitt felt, ikke avledet av `maxSetupAgeBars`:
-   * tilbakeblikket er en driftskostnad (RPC-kall og minne) og har ingenting å
-   * gjøre med hvor lenge et oppsett får leve.
+   * Styrer tre ting, med vilje samme tall: hvor mye historikk backfillen
+   * henter ved oppstart, hvor mange bars observatøren holder i sitt rullende
+   * handelsbuffer, og — som en direkte følge — **det lengste beinet
+   * strategien kan se**. Et bein som strekker seg over flere bars enn dette
+   * finnes ikke for `detectSwings`, uansett hvor ekte det er.
+   *
+   * Det er altså ikke bare en driftskostnad (RPC-kall og minne), det er også
+   * en strategigrense. Sett den for lavt og boten blir blind for de trege
+   * beina; sett den for høyt og oppstarten blir en kjedeskanning.
+   *
+   * Gulvet på 4: med barjustert klippekant beholdes N+1 bars, og
+   * `detectSwings` trenger minst én bar til bunnen, én til bekreftelsen og —
+   * etter at klippingen har begynt — én til vinduskanten den nekter å
+   * forankre i. Fire bars er det minste som gir deteksjonen noe å jobbe med;
+   * 1 gjorde den lydløst død.
    */
-  backfillLookbackBars: z.number().int().positive(),
+  backfillLookbackBars: z.number().int().min(4),
   reorgDepthBlocks: z.number().int().nonnegative(),
 }).strict()
 

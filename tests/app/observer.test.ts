@@ -32,7 +32,7 @@ function observer(
     pool, label: 'TEST/WETH', config, setups, notifier,
     log: { info: () => {}, warn: () => {}, error: () => {} },
   })
-  return { obs, setups, notifier }
+  return { obs, setups, notifier, db, config }
 }
 
 let n = 0
@@ -215,12 +215,174 @@ describe('Observer', () => {
     expect(bounded.notifier.sent.length).toBeGreaterThan(0)
   })
 
-  it('overlever omstart — oppsett og sendte varsler hentes fra basen', async () => {
+  it('overlever omstart — en ny observatør over samme base varsler ikke på nytt', async () => {
+    const first = observer()
+    await feedImpulse(first.obs)
+    await first.obs.onTrade(trade(12 * H, 137))
+    const before = first.setups.allActive()[0]!
+    expect(before.alertsSent).toEqual([0.5, 0.618])
+    expect(first.notifier.sent.filter((a) => a.kind === 'milestone')).toHaveLength(2)
+
+    // Omstart: ny SetupStore og ny Observer over samme basehåndtak
+    const setups = new SetupStore(first.db)
+    const notifier = new NullNotifier()
+    const restarted = new Observer({
+      pool, label: 'TEST/WETH', config: first.config, setups, notifier,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    expect(setups.allActive()[0]!.alertsSent).toEqual([0.5, 0.618])
+
+    // Slik main.ts starter opp: historikken gjennom replay(), så levende
+    for (let i = 1; i <= 10; i++) await restarted.replay(trade(i * H, 100 + i * 10))
+    await restarted.replay(trade(11 * H, 195))
+    await restarted.replay(trade(12 * H, 137))
+    expect(notifier.sent).toEqual([])
+
+    await restarted.onTrade(trade(12 * H + 1_000, 137))
+    expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
+  })
+
+  it('re-forankrer ikke på vinduskanten når bunnen glir ut av vinduet', async () => {
+    // Stigende bein over 60 bars. Bunnen ble satt på bar 1 og har for lengst
+    // forlatt 24-bars vinduet. Uten avvisningen av kantforankring ville
+    // detectSwings satt en ny kandidatbunn på bars[0] for hver bar, og hvert
+    // steg ville blitt et nytt oppsett.
+    const { obs, setups } = observer()
+    for (let i = 1; i <= 60; i++) await obs.onTrade(trade(i * H, 100 + i * 5))
+
+    const active = setups.allActive()
+    expect(active).toHaveLength(1)
+    const windowEdgeTs = 60 * H - 24 * H
+    expect(active[0]!.swing.lowTs).toBeLessThan(windowEdgeTs)
+  })
+
+  it('samler ikke opp oppsett når vinduet glir forbi et ekte bein', async () => {
+    // Ekte bunn på bar 3, ekte topp på bar 15, så 35 bars sidelengs over
+    // sonen. Sekvensen er lengre enn 24-bars vinduet, så bars[0] glir.
+    const { obs, setups, notifier } = observer()
+    const price = (i: number) => {
+      if (i <= 3) return 100
+      if (i <= 15) return 100 + (i - 3) * 8.5   // 100 -> 202
+      return 190                                 // sidelengs, godt over sonen
+    }
+    for (let i = 1; i <= 50; i++) await obs.onTrade(trade(i * H, price(i)))
+
+    expect(setups.allActive()).toHaveLength(1)
+    expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
+  })
+
+  it('et treg bein etterfulgt av retracement gir ett oppsett, ikke atten', async () => {
+    const { obs, setups, notifier } = observer()
+    for (let i = 1; i <= 40; i++) await obs.onTrade(trade(i * H, 100 + (i - 1) * 2.5)) // 100 -> 197.5
+    for (let i = 41; i <= 45; i++) await obs.onTrade(trade(i * H, 180))
+    expect(setups.allActive()).toHaveLength(1)
+    expect(notifier.sent.filter((a) => a.kind === 'milestone')).toEqual([])
+  })
+
+  it('to bunner på én ekte topp gir ett oppsett, ikke søsken', async () => {
+    // Bunn A på bar 2 forsvinner ut av vinduet. Bunn B på bar 11 er en *indre*
+    // pivot, ikke en vinduskant, så det nye oppsettet slipper gjennom
+    // kantsjekken — men det er tegnet fra samme ekte topp på bar 21. Uten at
+    // superseder-regelen også nøkler på topp-tidspunktet, står de som søsken.
+    const { obs, setups } = observer()
+    const price = (i: number) => {
+      if (i === 1) return 200
+      if (i === 2) return 100      // bunn A
+      if (i <= 10) return 150
+      if (i === 11) return 130     // bunn B, indre pivot — for grunn til å bekrefte beinet
+      if (i <= 20) return 150
+      if (i === 21) return 400     // den ene ekte toppen
+      return 380
+    }
+    for (let i = 1; i <= 50; i++) await obs.onTrade(trade(i * H, price(i)))
+
+    const active = setups.allActive()
+    expect(active).toHaveLength(1)
+    expect(active[0]!.swing.highTs).toBe(21 * H)
+    expect(active[0]!.swing.lowTs).toBe(11 * H)   // den nyere, strammere bunnen vant
+  })
+
+  it('en annen pools handel rører ikke dette oppsettet', async () => {
+    // Nøyaktig slik main.ts kobler det: én SetupStore, én Observer per pool.
+    const shared = observer()
+    const poolB: PoolMeta = { ...pool, address: '0x2222222222222222222222222222222222222222' }
+    const obsB = new Observer({
+      pool: poolB, label: 'ANNEN/WETH', config: shared.config,
+      setups: shared.setups, notifier: shared.notifier,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+
+    await feedImpulse(shared.obs)
+    const before = shared.setups.allActive()
+    expect(before).toHaveLength(1)
+    expect(shared.notifier.sent).toEqual([])
+
+    // Pool B handler på en helt annen prisskala — under pool A sin swing low
+    await obsB.onTrade(trade(12 * H, 0.0001))
+
+    expect(shared.setups.activeForPool(pool.address)).toEqual(before)
+    expect(shared.notifier.sent.filter((a) => 'setup' in a && a.setup.poolAddress === pool.address))
+      .toEqual([])
+  })
+
+  it('disarmerer et ARMED oppsett når strømmen blir stale', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
-    await obs.onTrade(trade(12 * H, 137))
-    const before = setups.allActive()[0]!
-    expect(before.alertsSent).toContain(0.618)
-    expect(notifier.sent.length).toBeGreaterThan(0)
+    const s = setups.allActive()[0]!
+    setups.upsert({ ...s, state: 'ARMED' })
+    expect(setups.get(s.id)!.state).toBe('ARMED')
+
+    await obs.onStale(45_000)
+
+    expect(setups.get(s.id)!.state).toBe('DETECTED')
+    expect(notifier.sent.map((a) => a.kind)).toEqual(['degraded'])
+  })
+
+  it('en støvhandel i sonen trigger ingenting', async () => {
+    const { obs, setups, notifier } = observer({ minTradeSizeQuote: '1000' })
+    await feedImpulse(obs)
+    expect(setups.allActive()).toHaveLength(1)
+
+    // Midt i sonen 120.26–129.26, men under minTradeSizeQuote
+    await obs.onTrade({
+      ts: 12 * H, txHash: '0xdust', logIndex: 999, priceQuote: '125',
+      sizeQuote: 999n, sizeBase: 1n, side: 'buy',
+    })
+
+    expect(setups.allActive()[0]!.state).toBe('DETECTED')
+    expect(notifier.sent).toEqual([])
+  })
+
+  it('varsler ikke samme nivå to ganger når to handler behandles samtidig', async () => {
+    // main.ts sender flere handler fra samme viem-batch uten å avvente hver,
+    // og `newAlerts` beregnes før første await. Uten at recordAlert sier om
+    // nivået faktisk ble lagt til, sender to samtidige kall samme milepæl.
+    const db = openDb(':memory:')
+    migrate(db)
+    const setups = new SetupStore(db)
+    const config = {
+      ...DEFAULT_CONFIG,
+      strategy: { ...DEFAULT_CONFIG.strategy, minSwingVolumeQuote: '0', minTradeSizeQuote: '0' },
+    }
+    const sent: string[] = []
+    const slow = {
+      async send(a: { kind: string; level?: number }) {
+        await new Promise((r) => setTimeout(r, 20))
+        sent.push(`${a.kind}${a.level ?? ''}`)
+      },
+    }
+    const obs = new Observer({
+      pool, label: 'TEST/WETH', config, setups, notifier: slow as never,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+
+    await feedImpulse(obs)
+    expect(setups.allActive()[0]!.alertsSent).toEqual([])
+
+    // To uavventede kall til samme pris, kjørt samtidig
+    await Promise.all([obs.onTrade(trade(12 * H, 137)), obs.onTrade(trade(12 * H, 137))])
+
+    expect(sent.filter((k) => k === 'milestone0.618')).toHaveLength(1)
+    expect(sent.filter((k) => k === 'milestone0.5')).toHaveLength(1)
   })
 })

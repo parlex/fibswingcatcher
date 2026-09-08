@@ -39,6 +39,7 @@ export class Observer {
   private bars: Bar[] = []
   private lastBarTs = -1
   private newestTs = Number.NEGATIVE_INFINITY
+  private pruned = false
   private intervalMs: number
   private windowMs: number
   private minTradeSize: bigint
@@ -107,7 +108,7 @@ export class Observer {
 
   async onStale(sinceMs: number): Promise<void> {
     this.deps.log.warn({ sinceMs }, 'datastrøm stale — disarmerer')
-    for (const s of this.deps.setups.allActive()) {
+    for (const s of this.deps.setups.activeForPool(this.deps.pool.address)) {
       if (s.state === 'ARMED') this.deps.setups.upsert({ ...s, state: 'DETECTED' })
     }
     await this.deps.notifier.send({ kind: 'degraded', sinceMs })
@@ -140,7 +141,11 @@ export class Observer {
    */
   private pruneTrades(): void {
     const cutoff = this.cutoffTs()
-    this.trades = this.trades.filter((t) => t.ts >= cutoff)
+    const kept = this.trades.filter((t) => t.ts >= cutoff)
+    // Har vi først kastet historikk, er `bars[0]` en vinduskant og ikke lenger
+    // begynnelsen på det vi vet. `detectNewSetups` trenger å vite forskjellen.
+    if (kept.length !== this.trades.length) this.pruned = true
+    this.trades = kept
   }
 
   private rebuildBars(): void {
@@ -157,6 +162,24 @@ export class Observer {
 
     const latest = swings.at(-1)
     if (!latest) return
+
+    // Et bein hvis bunn ligger på den eldste beholdte baren er forankret i en
+    // vinduskant, ikke i en pivot: prisen kan ha vært lavere rett før vinduet,
+    // og vi kastet nettopp bevisene. Fib-nivåer tegnet derfra er tall uten
+    // mening, og etter hvert som vinduet glir flytter en slik bunn seg hver
+    // bar — hvert steg et nytt oppsett som varsler for seg selv.
+    //
+    // Kravet gjelder bare etter at noe *er* kastet. Før det er `bars[0]`
+    // begynnelsen på all kjent historikk, og en bunn der er så god en pivot
+    // som vi kan få.
+    const oldestBar = this.bars[0]
+    if (this.pruned && oldestBar && latest.lowTs <= oldestBar.openTs) {
+      this.deps.log.info(
+        { lowTs: latest.lowTs, eldsteBarTs: oldestBar.openTs },
+        'oppsett avvist — bunnen ligger på vinduskanten',
+      )
+      return
+    }
 
     const fibOpts = {
       fibEntry: strategy.fibEntry,
@@ -176,10 +199,13 @@ export class Observer {
     // evaluerings-overgang: uten den ville replayen etterlatt ett foreldet
     // oppsett per utvidelse, og den første levende handelen hadde evaluert
     // dem alle og sendt nettopp den bygen replay-modusen finnes for å hindre.
-    for (const old of this.deps.setups.allActive()) {
-      if (old.poolAddress === setup.poolAddress && old.swing.lowTs === latest.lowTs) {
+    for (const old of this.deps.setups.activeForPool(setup.poolAddress)) {
+      // Samme bunn: beinet har utvidet toppen sin.
+      // Samme topp: bunnen har flyttet seg — typisk fordi vinduet gled — og
+      // to oppsett tegnet fra én ekte topp er søsken, ikke to oppsett.
+      if (old.swing.lowTs === latest.lowTs || old.swing.highTs === latest.highTs) {
         this.deps.setups.upsert({ ...old, state: 'EXPIRED' })
-        this.deps.log.info({ id: old.id, erstattetAv: setup.id }, 'oppsett erstattet av utvidet bein')
+        this.deps.log.info({ id: old.id, erstattetAv: setup.id }, 'oppsett erstattet')
       }
     }
 
@@ -190,7 +216,7 @@ export class Observer {
   private async evaluateAll(price: number, nowTs: number, replay: boolean): Promise<void> {
     const { strategy } = this.deps.config
 
-    for (const setup of this.deps.setups.allActive()) {
+    for (const setup of this.deps.setups.activeForPool(this.deps.pool.address)) {
       const tr = evaluateSetup(setup, {
         price, nowTs,
         intervalMs: this.intervalMs,
@@ -202,8 +228,12 @@ export class Observer {
       for (const level of tr.newAlerts) {
         // Registreringen skjer også under replay: den er nettopp poenget med
         // primingen, slik at et passert nivå ikke annonseres etter omstart.
-        this.deps.setups.recordAlert(setup.id, level)
-        if (replay) continue
+        //
+        // `recordAlert` sier om nivået faktisk ble lagt til. To samtidige
+        // `onTrade`-kall beregner begge `newAlerts` før første `await`, så
+        // uten denne sjekken sender de samme milepæl to ganger.
+        const recorded = this.deps.setups.recordAlert(setup.id, level)
+        if (replay || !recorded) continue
         const alert = setup.levels.alerts.find((a) => a.level === level)!
         await this.deps.notifier.send({
           kind: 'milestone',

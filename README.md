@@ -37,6 +37,12 @@ I drift: kjør `tsx src/app/main.ts` direkte, **ikke** gjennom `npm start`. npm
 videresender ikke SIGTERM til barneprosessen, så basen lukkes ikke ryddig ved
 stopp. `npm start` er greit lokalt, der du avslutter med Ctrl-C.
 
+Oppsett går gjennom tilstandene `DETECTED → TRIGGERED` i denne planen.
+`ARMED` — at et oppsett er skarpt og klart til å fylles — hører til en senere
+plan sammen med risikomotoren og eksekveringen. Observatøren disarmerer
+allerede `ARMED` når datastrømmen blir stale, slik at den delen er på plass
+før det finnes noe som armerer.
+
 ## Sikkerhet
 
 - Boten bruker en dedikert hot wallet som kun finansieres med beløp som tåles tapt

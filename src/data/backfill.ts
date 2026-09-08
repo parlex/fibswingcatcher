@@ -9,17 +9,37 @@ export type LogReader = {
   getBlock(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }>
 }
 
+export type RetryInfo = {
+  attempt: number
+  delayMs: number
+  error: unknown
+}
+
 export type BackfillOpts = {
   /** Antall forsøk per RPC-kall før feilen slippes videre. */
   maxAttempts?: number
-  /** Første pause. Dobles for hvert nye forsøk, med tak på 30 sekunder. */
+  /** Første pause. Dobles for hvert nye forsøk. */
   baseDelayMs?: number
   /** Injiserbar for testene, slik at de ikke må vente i sanntid. */
   sleep?: (ms: number) => Promise<void>
+  /**
+   * Kalles før hver pause. Uten den ser en 429-storm ut som en oppstart som
+   * bare er treg, og det er nettopp forskjellen man trenger å se.
+   */
+  onRetry?: (info: RetryInfo) => void
 }
 
 const DEFAULT_MAX_ATTEMPTS = 5
 const DEFAULT_BASE_DELAY_MS = 500
+
+/**
+ * Tak på pausen.
+ *
+ * Med standardverdiene bindes den aldri: fem forsøk gir 500, 1000, 2000 og
+ * 4000 ms, altså 7,5 sekunder til sammen. Taket finnes for kallere som setter
+ * `maxAttempts` høyere — fra og med det åttende forsøket ville doblingen
+ * ellers gått fra et halvt minutt til flere minutter per pause.
+ */
 const MAX_DELAY_MS = 30_000
 
 const nap = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
@@ -41,6 +61,7 @@ async function withRetry<T>(fn: () => Promise<T>, r: Required<BackfillOpts>): Pr
       return await fn()
     } catch (e) {
       if (attempt >= r.maxAttempts) throw e
+      r.onRetry({ attempt, delayMs: delay, error: e })
       await r.sleep(delay)
       delay = Math.min(delay * 2, MAX_DELAY_MS)
     }
@@ -55,6 +76,7 @@ export async function backfillTrades(
     maxAttempts: opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     baseDelayMs: opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
     sleep: opts.sleep ?? nap,
+    onRetry: opts.onRetry ?? (() => {}),
   }
   const seen = new Set<string>()
   const timestamps = new Map<bigint, number>()

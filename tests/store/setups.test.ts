@@ -132,3 +132,39 @@ describe('WatchlistStore', () => {
     expect(watchlist.all()[0]!.label).toBe('ny')
   })
 })
+
+describe('SetupStore per pool', () => {
+  const OTHER = '0x2222222222222222222222222222222222222222' as const
+
+  it('activeForPool gir bare den poolens oppsett', () => {
+    const { setups } = store()
+    const a = createSetup(POOL, swing, FIB, 1000)
+    const b = createSetup(OTHER, swing, FIB, 1000)
+    setups.upsert(a); setups.upsert(b)
+    expect(setups.activeForPool(POOL).map((s) => s.id)).toEqual([a.id])
+    expect(setups.activeForPool(OTHER).map((s) => s.id)).toEqual([b.id])
+  })
+
+  it('activeForPool utelater avsluttede oppsett', () => {
+    const { setups } = store()
+    const a = createSetup(POOL, swing, FIB, 1000)
+    const b = { ...createSetup(POOL, { ...swing, lowTs: 5 }, FIB, 1000), state: 'INVALIDATED' as const }
+    setups.upsert(a); setups.upsert(b)
+    expect(setups.activeForPool(POOL).map((s) => s.id)).toEqual([a.id])
+  })
+
+  it('activeForPool bryr seg ikke om store og små bokstaver i adressen', () => {
+    const { setups } = store()
+    setups.upsert(createSetup(POOL, swing, FIB, 1000))
+    expect(setups.activeForPool(POOL.toUpperCase() as typeof POOL)).toHaveLength(1)
+  })
+
+  it('recordAlert sier om nivået faktisk ble lagt til', () => {
+    const { setups } = store()
+    const a = createSetup(POOL, swing, FIB, 1000)
+    setups.upsert(a)
+    expect(setups.recordAlert(a.id, 0.618)).toBe(true)
+    expect(setups.recordAlert(a.id, 0.618)).toBe(false)
+    expect(setups.recordAlert('finnes-ikke', 0.618)).toBe(false)
+  })
+})

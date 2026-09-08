@@ -95,6 +95,26 @@ describe('backfillTrades ved rate-limiting', () => {
     expect(r.getLogs).toHaveBeenCalledTimes(3)
   })
 
+  it('melder hvert nye forsøk til onRetry', async () => {
+    const r = reader({ '0-9': [log(5n, 0)] })
+    const inner = r.getLogs
+    let attempts = 0
+    r.getLogs = vi.fn(async (args: { fromBlock: bigint; toBlock: bigint }) => {
+      if (++attempts <= 2) throw new Error('Too Many Requests')
+      return inner(args)
+    })
+    const seen: { attempt: number; delayMs: number; message: string }[] = []
+    await backfillTrades(r, meta, 0n, 9n, 10, {
+      sleep: async () => {},
+      onRetry: ({ attempt, delayMs, error }) =>
+        seen.push({ attempt, delayMs, message: (error as Error).message }),
+    })
+    expect(seen).toEqual([
+      { attempt: 1, delayMs: 500, message: 'Too Many Requests' },
+      { attempt: 2, delayMs: 1_000, message: 'Too Many Requests' },
+    ])
+  })
+
   it('prøver også blokk-tidsstempler på nytt', async () => {
     const r = reader({ '0-9': [log(5n, 0)] })
     const inner = r.getBlock
