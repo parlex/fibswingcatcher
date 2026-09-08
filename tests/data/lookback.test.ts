@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FALLBACK_BLOCKS_PER_MS, MAX_BLOCKS_PER_MS, MAX_LOOKBACK_FRACTION,
-  lookbackFrom, measureBlocksPerMs,
+  MAX_BLOCKS_PER_MS, MAX_LOOKBACK_FRACTION, lookbackFrom, measureBlocksPerMs,
 } from '../../src/data/lookback.js'
 
 // Ekte tall fra Robinhood Chain: 24 bars a 1h, kjedehøyde og målt takt
@@ -47,8 +46,8 @@ describe('lookbackFrom', () => {
   it('faller forsiktig tilbake når takten ikke kunne måles', () => {
     const d = lookbackFrom(LATEST, undefined, LOOKBACK_MS)
     expect(d.rateSource).toBe('fallback')
-    expect(d.lookbackBlocks).toBe(BigInt(LOOKBACK_MS * FALLBACK_BLOCKS_PER_MS))
-    expect(d.fromBlock).toBeGreaterThan(0n)
+    expect(d.lookbackBlocks).toBe(86_400n)   // 0,001 blokker/ms x 86 400 000 ms
+    expect(d.fromBlock).toBe(LATEST - 86_400n)
   })
 
   it('en degenerert måling gir et kort, merket tilbakeblikk — ikke blokk 0', () => {
@@ -57,7 +56,7 @@ describe('lookbackFrom', () => {
     const d = lookbackFrom(LATEST, 100, LOOKBACK_MS)
     expect(d.guarded).toBe(true)
     expect(d.fromBlock).toBeGreaterThan(0n)
-    expect(d.lookbackBlocks).toBe(BigInt(LOOKBACK_MS * FALLBACK_BLOCKS_PER_MS))
+    expect(d.lookbackBlocks).toBe(86_400n)
   })
 
   it('en troverdig-men-høy takt vernes også', () => {
@@ -86,7 +85,10 @@ describe('lookbackFrom', () => {
   })
 
   it('gir aldri blokk 0 på en moden kjede, uansett hvor gal målingen er', () => {
-    for (const rate of [MEASURED, 0.05, 0.067, 0.1, 0.67, 1, 10, 1_000, 1e9]) {
+    // 0,6698 er den eksakte takten der lookbackBlocks == kjedehøyden, altså
+    // nøyaktig punktet der fromBlock ble 0n før vernet.
+    const exactlyChainHeight = Number(LATEST) / LOOKBACK_MS
+    for (const rate of [MEASURED, 0.05, 0.067, 0.1, exactlyChainHeight, 0.67, 1, 10, 1_000, 1e9]) {
       const d = lookbackFrom(LATEST, rate, LOOKBACK_MS)
       expect(d.fromBlock, `takt ${rate}`).toBeGreaterThan(0n)
       expect(d.lookbackBlocks, `takt ${rate}`).toBeLessThan(LATEST)
