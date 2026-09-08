@@ -17,8 +17,9 @@
 - **Node 22+, ESM** (`"type": "module"`). Verifisert lokalt: v22.6.0.
 - **TypeScript strict.** `strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`.
 - **Ingen magiske tall i koden.** Hver terskel kommer fra config-skjemaet i Task 1.
-- **Priser og mengder er `bigint` eller `Decimal`-strenger, aldri `number`.** Et token med 18 desimaler overskrider `Number.MAX_SAFE_INTEGER`. Kun avledede forholdstall (prosent, RR) er `number`.
-- **Rene moduler rører aldri IO.** `src/bars/`, `src/strategy/` og `src/alerts/milestones.ts` importerer ikke `viem`, `better-sqlite3`, `node:fs` eller `grammy`. Håndheves av en test i Task 1.
+- **Rå tokenmengder er alltid `bigint`.** Et token med 18 desimaler overskrider `Number.MAX_SAFE_INTEGER`.
+- **Priser som krysser en modulgrense er desimalstrenger** (`Trade.priceQuote`, `Bar.open/high/low/close`, `Swing.low/high`). Innenfor strategilaget regnes avledet fib-aritmetikk i `number` — nivåer, avstander og RR er forholdstall der 15–17 signifikante siffer er rikelig, og der `bigint` ville gjort koden uleselig uten å gjøre den riktigere.
+- **Rene moduler rører aldri IO.** `src/bars/`, `src/strategy/` og `src/alerts/format.ts` importerer ikke `viem`, `better-sqlite3`, `node:fs` eller `grammy`. Håndheves av en test i Task 1.
 - **Chain:** Robinhood Chain, chain ID **4663**, HTTP RPC `https://rpc.mainnet.chain.robinhood.com`, gass i ETH.
 - **Ingen hemmeligheter i repoet.** Telegram-token og RPC-nøkler leses fra `.env`, som er i `.gitignore`.
 - **Denne planen sender aldri en transaksjon.** Ingen `walletClient`, ingen privatnøkkel, ingen signering. Kun lesing.
@@ -311,7 +312,7 @@ Opprett tomme kataloger `src/bars/` og `src/strategy/` med en `.gitkeep` slik at
 I spec-seksjon 8, tabellen «Strategi», endre raden `minTradeSizeUsd` til:
 
 ```
-| `minTradeSizeQuote` | 50 (quote-token) | Handler under dette ignoreres i bars og som trigger. USD-konvertering innføres med prisorakelet i plan 3. |
+| `minTradeSizeQuote` | 0.015 (quote-token) | Handler under dette ignoreres i bars og som trigger. Verdien må uttrykkes i quote-token, ikke bare enheten: specens 50 USD er ~0,015 WETH, og tallet 50 tolket som WETH slipper gjennom 0 av 807 ekte handler. USD-konvertering innføres med prisorakelet i plan 3. |
 ```
 
 - [ ] **Step 9: Kjør alt og commit**
@@ -485,7 +486,7 @@ git commit -m "feat: BarAggregator som bygger OHLCV fra rå handler"
 **Interfaces:**
 - Consumes: `Bar`, `Swing`
 - Produces: `function detectSwings(bars: Bar[], opts: SwingOpts): Swing[]` der
-  `type SwingOpts = { minSwingPct: number; minSwingDurationMs: number; minSwingVolumeQuote: bigint; intervalMs: number }`
+  `type SwingOpts = { minSwingPct: number; minSwingDurationMs: number; minSwingVolumeQuote: bigint }`
 
 Algoritmen: gå gjennom bars kronologisk og hold et løpende ekstrempunkt. Er vi i en **nedtrend**, oppdateres kandidatbunnen så lenge nye lavere lows kommer. Når en bar lager en `high` som ligger `minSwingPct` over kandidatbunnen, er bunnen **bekreftet** og vi snur til opptrend. Et bein rapporteres som `Swing` først når både bunn og topp er bekreftet, og beinet passerer terskelene for varighet og volum.
 
@@ -507,7 +508,6 @@ const OPTS = {
   minSwingPct: 15,
   minSwingDurationMs: 0,
   minSwingVolumeQuote: 0n,
-  intervalMs: H,
 }
 
 let seq = 0
@@ -629,7 +629,6 @@ export type SwingOpts = {
   minSwingPct: number
   minSwingDurationMs: number
   minSwingVolumeQuote: bigint
-  intervalMs: number
 }
 
 type Pivot = { ts: number; price: number }
@@ -885,7 +884,7 @@ git commit -m "feat: fib-nivåer, entry-sone og RR-beregning"
 
 Denne modulen er ren: den beregner *hvilken* overgang som skal skje, men utfører ingen. Å sende varselet og lagre tilstanden er orkestratorens jobb i Task 11. Det er det som gjør hele livssyklusen testbar uten Telegram og uten database.
 
-`id` genereres av kalleren og sendes inn, slik at modulen forblir deterministisk.
+`id` utledes deterministisk av `poolAddress` og swingens tidsstempler, slik at samme swing alltid gir samme id uten noen ambient input.
 
 - [ ] **Step 1: Skriv de feilende testene**
 
@@ -1097,7 +1096,11 @@ git commit -m "feat: ren tilstandsmaskin for oppsettets livssyklus"
   - `function decodeSwapLog(log: RawLog, meta: PoolMeta, blockTs: number): Trade`
   - `function priceFromSqrtX96(sqrtPriceX96: bigint, meta: PoolMeta): string`
 
-**Dette dekker spec 6.7, mottiltak 2.** Prisen leses fra `sqrtPriceX96` i selve eventen, som *er* poolens spotpris etter handelen — utledet av reservene, ikke av mengdeforholdet i én enkelt swap. En bittelitenswap som forsøker å printe en absurd pris kan derfor ikke lyve om nivået. Mottiltak 1, størrelsesfilteret, ligger i Task 2 og Task 11.
+**Dette dekker *ikke* spec 6.7, mottiltak 2.** Den opprinnelige teksten her påsto at en bitteliten swap «ikke kan lyve om nivået» fordi prisen leses fra `sqrtPriceX96`. Det er galt om mekanismen. `sqrtPriceX96` i et V3 Swap-event er poolens pris *etter* swappen, og prispåvirkning i V3 er omvendt proporsjonal med aktiv likviditet — som er selve definisjonen av en tynn pool. En liten swap der flytter prisen langt, og eventen rapporterer den manipulerte verdien helt korrekt.
+
+Hva `sqrtPriceX96` faktisk kjøper: den fjerner skjevheten i `amount1/amount0`, som er forurenset av gebyrer og delvise fills. Det er en reell forbedring av *prisnøyaktigheten*, men ikke et forsvar mot manipulasjon.
+
+Mottiltak 2 — å validere mot en uavhengig lesning av poolens pris — er implementert i Task 11 som et `slot0`-oppslag ved tilstandsendrende evalueringer (`src/data/spot.ts`, `Observer.priceLooksReal`). Mottiltak 1, størrelsesfilteret, ligger i Task 2 og Task 11, og krever at terskelen skaleres med quote-tokenets desimaler før den sammenlignes med rå kjede-enheter.
 
 **Dette er planens eneste task som starter med en undersøkelse.** Vi vet at Uniswap er deployet på Robinhood Chain, men ikke hvilken versjon, og event-signaturen avgjør hele dekoderen. Å gjette her og oppdage feilen i Task 11 ville kastet bort tre tasks.
 
@@ -2452,7 +2455,7 @@ describe('Observer', () => {
     const { obs, notifier } = observer()
     await feedImpulse(obs)
     await obs.onTrade(trade(12 * H, 137))
-    await obs.onTrade(trade(12 * H + 1_000, 112))   // wick ned i sonen
+    await obs.onTrade(trade(12 * H + 1_000, 125))   // wick ned i sonen (120.26–129.26)
     await obs.onTrade(trade(12 * H + 11_000, 140))  // og ut igjen
     expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
   })
@@ -2587,7 +2590,6 @@ export class Observer {
       minSwingPct: strategy.minSwingPct,
       minSwingDurationMs: strategy.minSwingDurationMs,
       minSwingVolumeQuote: this.minSwingVolume,
-      intervalMs: this.intervalMs,
     })
 
     const latest = swings.at(-1)

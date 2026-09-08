@@ -397,9 +397,18 @@ reorg.
 Reell angrepsvektor: én liten swap kan printe en absurd pris, og noen kan bevisst
 wicke en tynn pool ned i sonen for å trigge boter og selge inn i kjøpet.
 
-1. Handler under `minTradeSizeUsd` teller hverken i bar-bygging eller som trigger
-2. En sone-berøring valideres mot **poolens spotpris fra reservene**, ikke bare
-   mot den printede handelsprisen
+1. Handler under `minTradeSizeQuote` teller hverken i bar-bygging eller som
+   trigger. Terskelen er uttrykt i quote-token og **må skaleres med tokenets
+   desimaler** før den sammenlignes med beløpene i et Swap-event, som er rå
+   kjede-enheter. Uten skaleringen betyr «50» femti wei, altså ingen terskel.
+2. En sone-berøring valideres mot **en uavhengig lesning av poolens pris**
+   (`slot0`), ikke bare mot den printede handelsprisen.
+
+   Merk: å lese `sqrtPriceX96` fra selve eventen er *ikke* denne valideringen.
+   Det feltet er poolens pris etter swappen, og i en tynn pool flytter en liten
+   swap den langt — eventen rapporterer da den manipulerte prisen korrekt. Et
+   uavhengig oppslag etterpå ser prisen slik den faktisk står, og det er
+   forskjellen som kan måles.
 
 ### 6.8 Observabilitet
 
@@ -473,14 +482,14 @@ per-token-overstyring. Ingen magiske tall i koden.
 | `structureTimeframe` | `1h` | Tidsramme for swings og fib |
 | `minSwingPct` | 15 % | Minste bevegelse som teller som bein |
 | `minSwingDurationMs` | 30 000 | Minste varighet på et bein |
-| `minSwingVolume` | 10 000 USD | Minste volum i et bein |
+| `minSwingVolumeQuote` | 3 (quote-token) | Minste volum i et bein. Specens 10 000 USD uttrykt i WETH; må stilles om per quote-token. USD krever prisorakelet i plan 3. |
 | `fibEntry` | 0.886 | Bunn av entry-sonen |
 | `fibZoneTop` | 0.786 | Topp av entry-sonen, dårligste fyll |
 | `tpPct` | 60 % | Take profit |
 | `slBufferPct` | 2 % | Under swingbunnen |
 | `minRR` | 3.0 | Minste akseptable RR |
 | `maxSetupAgeBars` | 48 | Levetid for oppsett og armering |
-| `minTradeSizeUsd` | 50 USD | Handler under dette ignoreres i bars og som trigger |
+| `minTradeSizeQuote` | 0.015 (quote-token) | Handler under dette ignoreres i bars og som trigger. Specens 50 USD uttrykt i WETH; må stilles om per quote-token. Målt: terskelen `50` i quote-token slapp gjennom 0 av 807 ekte handler. USD-konvertering innføres med prisorakelet i plan 3. |
 
 ### Risiko
 

@@ -1,0 +1,36 @@
+{
+  "name": "fibswingcatcher",
+  "version": "0.1.0",
+  "description": "Handelsbot for ERC-20-tokens på Robinhood Chain (chain ID 4663).",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/app/main.ts",
+    "watchlist:add": "tsx scripts/add-pool.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.4.2",
+    "grammy": "^1.46.0",
+    "pino": "^10.3.1",
+    "viem": "^2.56.3",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.5.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
