@@ -87,3 +87,17 @@ export function viemLogReader(client: SwapLogClient): LogReader {
     },
   }
 }
+
+/**
+ * Sier om en RPC-feil betyr at spørringen ga for mange treff.
+ *
+ * Robinhood Chain sitt offentlige endepunkt svarer
+ * `-32000  logs matched by query exceeds limit of 10000`. Målt: den travleste
+ * poolen på kjeden gjør ~1,3 swap per blokk, så et 500 000-blokkers vindu ber
+ * om ~650 000 treff. Feilen er deterministisk, så `backfillTrades` skal dele
+ * vinduet i to framfor å prøve igjen.
+ */
+export function isResultLimitError(e: unknown): boolean {
+  const message = e instanceof Error ? e.message : String(e)
+  return /exceeds limit|too many results|query returned more than/i.test(message)
+}

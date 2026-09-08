@@ -27,6 +27,19 @@ export type BackfillOpts = {
    * bare er treg, og det er nettopp forskjellen man trenger å se.
    */
   onRetry?: (info: RetryInfo) => void
+  /**
+   * Sier om en feil betyr «vinduet ga for mange treff».
+   *
+   * Robinhood Chain sitt endepunkt topper ut på 10 000 logger per spørring, og
+   * den travleste poolen på kjeden gjør 1,3 swap per blokk — 500 000 blokker
+   * ville bedt om ~650 000 treff. Det er ikke en forbigående feil: samme
+   * spørsmål gir samme svar for alltid, så vinduet må deles, ikke prøves på
+   * nytt. Hva feilen *ser ut som* er transportspesifikt, så kalleren eier
+   * gjenkjenningen — se `isResultLimitError` i `./viem.ts`.
+   */
+  shouldSplit?: (e: unknown) => boolean
+  /** Kalles når et vindu deles, slik at oppstarten kan forklare seg. */
+  onSplit?: (info: { from: bigint; to: bigint; error: unknown }) => void
 }
 
 const DEFAULT_MAX_ATTEMPTS = 5
@@ -60,6 +73,8 @@ async function withRetry<T>(fn: () => Promise<T>, r: Required<BackfillOpts>): Pr
     try {
       return await fn()
     } catch (e) {
+      // Deterministiske feil skal ikke prøves på nytt — de skal deles.
+      if (r.shouldSplit(e)) throw e
       if (attempt >= r.maxAttempts) throw e
       r.onRetry({ attempt, delayMs: delay, error: e })
       await r.sleep(delay)
@@ -77,6 +92,29 @@ export async function backfillTrades(
     baseDelayMs: opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
     sleep: opts.sleep ?? nap,
     onRetry: opts.onRetry ?? (() => {}),
+    shouldSplit: opts.shouldSplit ?? (() => false),
+    onSplit: opts.onSplit ?? (() => {}),
+  }
+
+  /**
+   * Henter loggene for ett blokkvindu, og halverer vinduet om det ga for mange
+   * treff. `rangeSize` er dermed et *hint*, ikke en grense: et stort vindu
+   * koster få kall på en stille pool, og deler seg selv ned på en travel.
+   */
+  const fetchLogs = async (from: bigint, to: bigint): Promise<BlockLog[]> => {
+    try {
+      return await withRetry(
+        () => client.getLogs({ address: meta.address, fromBlock: from, toBlock: to }),
+        retry,
+      )
+    } catch (e) {
+      if (from >= to || !retry.shouldSplit(e)) throw e
+      retry.onSplit({ from, to, error: e })
+      const mid = from + (to - from) / 2n
+      const lower = await fetchLogs(from, mid)
+      const upper = await fetchLogs(mid + 1n, to)
+      return [...lower, ...upper]
+    }
   }
   const seen = new Set<string>()
   const timestamps = new Map<bigint, number>()
@@ -85,10 +123,7 @@ export async function backfillTrades(
 
   for (let start = from; start <= to; start += step) {
     const end = start + step - 1n > to ? to : start + step - 1n
-    const logs = await withRetry(
-      () => client.getLogs({ address: meta.address, fromBlock: start, toBlock: end }),
-      retry,
-    )
+    const logs = await fetchLogs(start, end)
 
     for (const log of logs) {
       const key = `${log.transactionHash}-${log.logIndex}`

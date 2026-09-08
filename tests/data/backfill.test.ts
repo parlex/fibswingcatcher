@@ -128,3 +128,58 @@ describe('backfillTrades ved rate-limiting', () => {
     expect(trade!.ts).toBe(1_700_005_000)
   })
 })
+
+describe('backfillTrades ved for mange treff', () => {
+  const tooMany = () => new Error('logs matched by query exceeds limit of 10000')
+  const splittable = (e: unknown) => /exceeds limit/.test((e as Error).message)
+
+  it('deler vinduet i to når det ga for mange treff', async () => {
+    const asked: string[] = []
+    const r = {
+      getLogs: vi.fn(async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+        asked.push(`${fromBlock}-${toBlock}`)
+        if (toBlock - fromBlock > 4n) throw tooMany()
+        return fromBlock === 0n ? [log(1n, 0)] : [log(7n, 0, '0xbb')]
+      }),
+      getBlock: vi.fn(async ({ blockNumber }: { blockNumber: bigint }) =>
+        ({ timestamp: BigInt(1_700_000) + blockNumber })),
+    }
+    const trades = await backfillTrades(r, meta, 0n, 9n, 10, {
+      sleep: async () => {}, shouldSplit: splittable,
+    })
+    expect(asked).toEqual(['0-9', '0-4', '5-9'])
+    expect(trades).toHaveLength(2)
+  })
+
+  it('prøver ikke på nytt når feilen er deterministisk', async () => {
+    const r = reader({ '0-4': [log(1n, 0)], '5-9': [] })
+    const inner = r.getLogs
+    r.getLogs = vi.fn(async (args: { fromBlock: bigint; toBlock: bigint }) => {
+      if (args.toBlock - args.fromBlock > 4n) throw tooMany()
+      return inner(args)
+    })
+    const retries: number[] = []
+    await backfillTrades(r, meta, 0n, 9n, 10, {
+      sleep: async () => {}, shouldSplit: splittable,
+      onRetry: ({ attempt }) => retries.push(attempt),
+    })
+    expect(retries).toEqual([])
+  })
+
+  it('gir opp når én enkelt blokk fortsatt gir for mange treff', async () => {
+    const r = reader({})
+    r.getLogs = vi.fn(async () => { throw tooMany() })
+    await expect(
+      backfillTrades(r, meta, 5n, 5n, 10, { sleep: async () => {}, shouldSplit: splittable }),
+    ).rejects.toThrow('exceeds limit')
+  })
+
+  it('deler ikke når kalleren ikke har oppgitt shouldSplit', async () => {
+    const r = reader({})
+    r.getLogs = vi.fn(async () => { throw tooMany() })
+    await expect(
+      backfillTrades(r, meta, 0n, 9n, 10, { maxAttempts: 2, sleep: async () => {} }),
+    ).rejects.toThrow('exceeds limit')
+    expect(r.getLogs).toHaveBeenCalledTimes(2)
+  })
+})

@@ -7,7 +7,7 @@ import { robinhoodChain, publicClient } from '../chain/client.js'
 import { type PoolMeta, loadPoolMeta } from '../data/pool.js'
 import { LiveStream } from '../data/live.js'
 import { backfillTrades } from '../data/backfill.js'
-import { SWAP_EVENT, toBlockLog, viemLogReader } from '../data/viem.js'
+import { SWAP_EVENT, isResultLimitError, toBlockLog, viemLogReader } from '../data/viem.js'
 import { migrate, openDb } from '../store/db.js'
 import { SetupStore, WatchlistStore, type WatchlistEntry } from '../store/setups.js'
 import { NullNotifier } from '../alerts/types.js'
@@ -153,6 +153,9 @@ async function start(): Promise<void> {
       {
         onRetry: ({ attempt, delayMs, error }) =>
           log.warn({ pool: entry.label, attempt, delayMs, err: error }, 'RPC-kall feilet — prøver igjen'),
+        shouldSplit: isResultLimitError,
+        onSplit: ({ from, to }) =>
+          log.info({ pool: entry.label, from, to }, 'for mange treff — deler blokkvinduet'),
       },
     )
     log.info({ pool: entry.label, trades: history.length }, 'backfill ferdig')
