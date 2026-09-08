@@ -884,7 +884,7 @@ git commit -m "feat: fib-nivåer, entry-sone og RR-beregning"
 
 Denne modulen er ren: den beregner *hvilken* overgang som skal skje, men utfører ingen. Å sende varselet og lagre tilstanden er orkestratorens jobb i Task 11. Det er det som gjør hele livssyklusen testbar uten Telegram og uten database.
 
-`id` genereres av kalleren og sendes inn, slik at modulen forblir deterministisk.
+`id` utledes deterministisk av `poolAddress` og swingens tidsstempler, slik at samme swing alltid gir samme id uten noen ambient input.
 
 - [ ] **Step 1: Skriv de feilende testene**
 
