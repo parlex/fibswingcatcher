@@ -30,12 +30,17 @@ function observer(
     strategy: { ...DEFAULT_CONFIG.strategy, minSwingVolumeQuote: '0', minTradeSizeQuote: '0', ...overrides },
     data: { ...DEFAULT_CONFIG.data, ...dataOverrides },
   }
+  const logs = { info: [] as object[], warn: [] as object[], error: [] as object[] }
   const obs = new Observer({
     pool, label: 'TEST/WETH', config, setups, notifier,
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: {
+      info: (o) => { logs.info.push(o) },
+      warn: (o) => { logs.warn.push(o) },
+      error: (o) => { logs.error.push(o) },
+    },
     ...extra,
   })
-  return { obs, setups, notifier, db, config }
+  return { obs, setups, notifier, db, config, logs }
 }
 
 /** Som `observer()`, men med standardkonfigurasjonen ordrett — ingen nullede
@@ -565,6 +570,59 @@ describe('Observer', () => {
     await feedImpulse(obs)
     await obs.onTrade(trade(AFTER, 137))   // krysser 0.5 og 0.618, ingen overgang
     expect(reads).toBe(0)
+  })
+
+  it('logger når spotoppslaget gir en ubrukelig pris i stedet for å tie', async () => {
+    // Eneste stien der mottiltaket slår seg av uten spor: en ikke-positiv
+    // eller uparsbar spotpris ga `return true` uten en eneste logglinje.
+    const { obs, setups, logs } = observer({}, {}, { spotPrice: async () => '0' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+
+    expect(setups.allActive()[0]!.state).toBe('TRIGGERED')   // feiler fortsatt åpent
+    expect(logs.warn.length).toBeGreaterThan(0)              // men ikke i stillhet
+  })
+
+  it('spot-sjekken validerer barlukkingen ugyldiggjøringen handler på, ikke ticken', async () => {
+    // Angrepet: manipuler barens SISTE handel ned under swing low, og la
+    // neste bars første handel være ærlig. Ugyldiggjøringen drives av
+    // `lastClosedBarClose` (1), men spot-sjekken fikk `price` (140) — som
+    // stemmer med spot, så mottiltaket slapp angrepet gjennom.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '140' })
+    await feedImpulse(obs)
+
+    await feedBar(obs, 13, [140, 1])       // bar 13 lukker på 1, godt under swing low 110
+    await obs.onTrade(trade(14 * H, 140))  // ærlig tick åpner bar 14
+
+    expect(setups.allActive()).toHaveLength(1)
+    expect(setups.allActive()[0]!.state).toBe('DETECTED')
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(false)
+  })
+
+  it('utløper selv om spotprisen spriker — utløp er aldersdrevet, ikke prisdrevet', async () => {
+    // En sprikende spot skal ikke kunne holde et gammelt oppsett i live.
+    // Uten dette blokkerer en angriper som styrer spriket alle utløp, og
+    // aktive oppsett hoper seg opp for alltid.
+    const { obs, setups } = observer({}, {}, { spotPrice: async () => '1' })
+    await feedImpulse(obs)
+    expect(setups.allActive()).toHaveLength(1)
+
+    await obs.onTrade(trade(61 * H, 140))   // godt forbi maxSetupAgeBars (48)
+
+    expect(setups.allActive()).toHaveLength(0)
+  })
+
+  it('ugyldiggjør fortsatt når barlukkingen selv bekreftes av spotprisen', async () => {
+    // Kontrollen: uten denne beviser testen over bare at ugyldiggjøring er
+    // skrudd av, ikke at den er blitt selektiv.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '100' })
+    await feedImpulse(obs)
+
+    await feedBar(obs, 13, [105, 100])     // ekte sammenbrudd, spot er enig
+    await obs.onTrade(trade(14 * H, 101))
+
+    expect(setups.allActive()).toHaveLength(0)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(true)
   })
 
   it('en støvhandel i sonen trigger ingenting', async () => {

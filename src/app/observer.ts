@@ -291,7 +291,15 @@ export class Observer {
       return true
     }
 
-    if (!(spot > 0)) return true
+    if (!(spot > 0)) {
+      // Uten denne logglinjen er dette den eneste stien der mottiltaket
+      // slår seg av uten spor.
+      this.deps.log.warn(
+        { setupId, spot },
+        'poolens spotpris var ikke et brukbart tall — stoler på handelsprisen',
+      )
+      return true
+    }
     const divergence = Math.abs(price - spot) / spot
     if (divergence <= MAX_SPOT_DIVERGENCE) return true
 
@@ -341,7 +349,18 @@ export class Observer {
 
       // Spec 6.7 mottiltak 2: en tilstandsendring er verdt ett uavhengig
       // prisoppslag. Milepæler er det ikke.
-      if (!replay && !(await this.priceLooksReal(price, setup.id))) continue
+      //
+      // Valider den prisen som faktisk DREV overgangen. Ugyldiggjøring drives
+      // av barlukkingen (spec 2.4), sone og RR av ticken. Å validere ticken på
+      // ugyldiggjøringsstien lot en angriper være ærlig på ticken og manipulere
+      // barens siste handel — spot-sjekken bekreftet da en pris beslutningen
+      // ikke var tatt på.
+      // Utløp er aldersdrevet og har ingen pris å validere. Å sende det
+      // gjennom sjekken lot en sprikende spot blokkere utløpet, så gamle
+      // oppsett hopet seg opp og kunne aldri dø.
+      const decisive = tr.state === 'INVALIDATED' ? this.lastClosedBarClose() ?? price : price
+      const priceDriven = tr.state !== 'EXPIRED'
+      if (!replay && priceDriven && !(await this.priceLooksReal(decisive, setup.id))) continue
 
       this.deps.setups.upsert({ ...this.deps.setups.get(setup.id)!, state: tr.state })
 
