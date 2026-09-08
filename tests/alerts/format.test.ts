@@ -41,4 +41,33 @@ describe('formatAlert', () => {
   it('formaterer gjenopprettet drift', () => {
     expect(formatAlert({ kind: 'recovered' }, '')).toMatch(/tilbake|gjenoppr/i)
   })
+
+  // New tests for number formatting fix (no exponential notation)
+  it('formaterer desimaltall nær 1e-7 uten eksponentnotasjon', () => {
+    const txt = formatAlert({ kind: 'milestone', setup: s, level: 0.5, price: 0.00000012345 }, 'MICRO')
+    expect(txt).not.toMatch(/e[+-]/i)
+  })
+
+  it('formaterer desimaltall nær 1e-12 uten eksponentnotasjon', () => {
+    const txt = formatAlert({ kind: 'milestone', setup: s, level: 0.5, price: 0.000000000001 }, 'NANO')
+    expect(txt).not.toMatch(/e[+-]/i)
+  })
+
+  it('formaterer 0.006526 lesbart uten eksponentnotasjon', () => {
+    const txt = formatAlert({ kind: 'zone', setup: s, price: 0.006526 }, 'PEPE')
+    expect(txt).not.toMatch(/e[+-]/i)
+    expect(txt).toContain('0.006526')
+  })
+
+  it('formaterer desimaltall >= 1 uten eksponentnotasjon', () => {
+    const txt = formatAlert({ kind: 'zone', setup: s, price: 150.5 }, 'ETH')
+    expect(txt).not.toMatch(/e[+-]/i)
+    expect(txt).toContain('150.5')
+  })
+
+  it('fjerner etterfølgende nuller fra desimaltall', () => {
+    const txt = formatAlert({ kind: 'zone', setup: s, price: 0.5 }, 'TOKEN')
+    expect(txt).toContain('0.5')
+    expect(txt).not.toMatch(/0\.5000/)
+  })
 })

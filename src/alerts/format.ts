@@ -1,6 +1,16 @@
 import type { Alert } from './types.js'
 
-const n = (v: number) => (v < 1 ? v.toPrecision(6) : v.toFixed(4).replace(/\.?0+$/, ''))
+const n = (v: number) => {
+  if (v >= 1) {
+    return v.toFixed(4).replace(/\.?0+$/, '')
+  }
+  if (v === 0) return '0'
+  // For v < 1: use exponent to calculate needed decimal places for ~6 sig figs
+  // Never use exponential notation, even for very small numbers
+  const exponent = Math.floor(Math.log10(v))
+  const decimalPlaces = Math.min(5 - exponent, 20)
+  return v.toFixed(decimalPlaces).replace(/\.?0+$/, '')
+}
 
 export function formatAlert(a: Alert, label: string): string {
   switch (a.kind) {
