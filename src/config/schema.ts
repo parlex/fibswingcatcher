@@ -25,9 +25,13 @@ export const DataSchema = z.object({
   maxDataStalenessMs: z.number().int().positive(),
   backfillBlockRange: z.number().int().positive(),
   /**
-   * Hvor mange bars på strukturtidsrammen som hentes ved oppstart. Eksplisitt
-   * felt, ikke avledet av `maxSetupAgeBars`: tilbakeblikket er en driftskostnad
-   * (RPC-kall) og har ingenting å gjøre med hvor lenge et oppsett får leve.
+   * Strukturvinduet, målt i bars på strukturtidsrammen.
+   *
+   * Styrer to ting, med vilje samme tall: hvor mye historikk backfillen henter
+   * ved oppstart, og hvor mange bars observatøren holder i sitt rullende
+   * handelsbuffer. Eksplisitt felt, ikke avledet av `maxSetupAgeBars`:
+   * tilbakeblikket er en driftskostnad (RPC-kall og minne) og har ingenting å
+   * gjøre med hvor lenge et oppsett får leve.
    */
   backfillLookbackBars: z.number().int().positive(),
   reorgDepthBlocks: z.number().int().nonnegative(),

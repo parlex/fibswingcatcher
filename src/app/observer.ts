@@ -85,8 +85,10 @@ export class Observer {
   private async ingest(trade: Trade, replay: boolean): Promise<void> {
     if (trade.sizeQuote < this.minTradeSize) return
 
-    // En handel eldre enn vinduet ville blitt klippet bort med en gang, og kan
-    // verken flytte strukturen eller trigge noe. Den slippes her.
+    // En handel eldre enn vinduet slippes her, før den kommer inn. Klippingen
+    // nedenfor ville fjernet den igjen umiddelbart — men ikke før
+    // `evaluateAll` hadde målt den gamle prisen mot alle aktive oppsett, og en
+    // eldgammel pris under swing low ugyldiggjør et fullgodt oppsett.
     if (trade.ts < this.cutoffTs()) return
 
     if (trade.ts > this.newestTs) this.newestTs = trade.ts
