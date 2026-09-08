@@ -3,7 +3,8 @@ import type { Bar, Trade } from '../domain/types.js'
 import type { PoolMeta } from '../data/pool.js'
 import type { Notifier } from '../alerts/types.js'
 import type { SetupStore } from '../store/setups.js'
-import { aggregate, timeframeMs } from '../bars/aggregator.js'
+import { timeframeMs } from '../bars/aggregator.js'
+import { IncrementalBars } from '../bars/incremental.js'
 import { detectSwings } from '../strategy/swings.js'
 import { createSetup, evaluateSetup } from '../strategy/setups.js'
 import { toBaseUnits } from '../domain/units.js'
@@ -24,11 +25,13 @@ export type ObserverDeps = {
   /**
    * Poolens pris lest uavhengig av eventen, typisk fra `slot0`.
    *
-   * Spec 6.7 mottiltak 2. Leses bare ved *tilstandsendrende* evalueringer —
-   * en sone-berøring på vei til TRIGGERED, eller et brudd på vei til
-   * INVALIDATED — altså ett RPC-kall på et sjeldent øyeblikk. Ikke ved
-   * milepælsvarsler. Utelatt betyr «ingen uavhengig kontroll», som er riktig
-   * for tester og for en backtest uten kjede.
+   * Spec 6.7 mottiltak 2. Leses bare ved overganger som er avgjort på
+   * *ticken* — en sone-berøring på vei til TRIGGERED, eller en RR-avvisning —
+   * altså ett RPC-kall på et sjeldent øyeblikk. Ikke ved milepælsvarsler, og
+   * ikke ved ugyldiggjøring: den er avgjort på en barlukking, som er et
+   * historisk faktum ingen nåtidslesning kan bekrefte. Utelatt betyr «ingen
+   * uavhengig kontroll», som er riktig for tester og for en backtest uten
+   * kjede.
    */
   spotPrice?: () => Promise<string>
 }
@@ -68,8 +71,10 @@ const MAX_SPOT_DIVERGENCE = 0.05
  * Å slå dem sammen er nøyaktig den feilen hele prosjektet finnes for å unngå.
  */
 export class Observer {
-  private trades: Trade[] = []
-  private bars: Bar[] = []
+  private barsStore: IncrementalBars
+  private acceptedCount = 0
+  private filteredCount = 0
+  private droppedOldCount = 0
   private lastBarTs = -1
   private newestTs = Number.NEGATIVE_INFINITY
   private intervalMs: number
@@ -90,11 +95,44 @@ export class Observer {
     const quoteDecimals = deps.pool.baseIsToken0 ? deps.pool.decimals1 : deps.pool.decimals0
     this.minTradeSize = toBaseUnits(deps.config.strategy.minTradeSizeQuote, quoteDecimals)
     this.minSwingVolume = toBaseUnits(deps.config.strategy.minSwingVolumeQuote, quoteDecimals)
+    this.barsStore = new IncrementalBars(this.intervalMs, this.windowMs, this.minTradeSize)
   }
 
-  /** Antall handler i det rullende bufferet. For logging og test. */
-  get bufferedTrades(): number {
-    return this.trades.length
+  /**
+   * Antall beholdte bars. Dette er størrelsen som er bundet — rå handler
+   * beholdes ikke i det hele tatt.
+   */
+  get retainedBars(): number {
+    return this.barsStore.size()
+  }
+
+  /** Handler som passerte størrelsesterskelen. */
+  get accepted(): number {
+    return this.acceptedCount
+  }
+
+  /**
+   * Handler som ble filtrert bort som for små.
+   *
+   * Sammen med `accepted` er dette diagnostikken for om størrelsesfilteret
+   * faktisk biter på en gitt pool. Er `filtered` null over tusenvis av
+   * handler, er terskelen for lav for quote-tokenet — som er nøyaktig
+   * feilmodusen på en stablecoin-priset pool.
+   */
+  get filtered(): number {
+    return this.filteredCount
+  }
+
+  /**
+   * Handler forkastet som eldre enn strukturvinduet.
+   *
+   * Egen teller fordi denne stien er bærende: en gammel pris som nådde
+   * `evaluateAll` ville ugyldiggjort et fullgodt oppsett. Uten telleren er en
+   * stille forkastet backfill-hale usynlig, og `passert + filtrertBort` ville
+   * ikke summert til antall handler sett.
+   */
+  get droppedOld(): number {
+    return this.droppedOldCount
   }
 
   /** En handel fra den levende strømmen. Begge klokkene går. */
@@ -121,18 +159,23 @@ export class Observer {
   }
 
   private async ingest(trade: Trade, replay: boolean): Promise<void> {
-    if (trade.sizeQuote < this.minTradeSize) return
+    if (trade.sizeQuote < this.minTradeSize) {
+      this.filteredCount += 1
+      return
+    }
 
     // En handel eldre enn vinduet slippes her, før den kommer inn. Klippingen
     // nedenfor ville fjernet den igjen umiddelbart — men ikke før
     // `evaluateAll` hadde målt den gamle prisen mot alle aktive oppsett, og en
     // eldgammel pris under swing low ugyldiggjør et fullgodt oppsett.
-    if (trade.ts < this.cutoffTs()) return
+    if (trade.ts < this.cutoffTs()) {
+      this.droppedOldCount += 1
+      return
+    }
 
     if (trade.ts > this.newestTs) this.newestTs = trade.ts
-    this.trades.push(trade)
-    this.pruneTrades()
-    this.rebuildBars()
+    this.acceptedCount += 1
+    this.barsStore.add(trade)
 
     const barTs = Math.floor(trade.ts / this.intervalMs) * this.intervalMs
     if (barTs > this.lastBarTs) {
@@ -168,25 +211,7 @@ export class Observer {
   }
 
   /**
-   * Holder handelsbufferen bundet til strukturvinduet.
-   *
-   * Uten dette vokser `trades` uten tak, og siden `rebuildBars` sorterer og
-   * skanner hele arrayen for hver innkommende handel, blir kostnaden
-   * kvadratisk i antall handler. En prosess som skal stå i dagevis og se på en
-   * travel pool maler seg da ned i løpet av timer. Å re-aggregere et *bundet*
-   * vindu på hver handel er greit — poenget er at kostnaden slutter å vokse.
-   */
-  private pruneTrades(): void {
-    const cutoff = this.cutoffTs()
-    this.trades = this.trades.filter((t) => t.ts >= cutoff)
-  }
-
-  private rebuildBars(): void {
-    this.bars = aggregate(this.trades, this.intervalMs, this.minTradeSize)
-  }
-
-  /**
-   * Bare de *lukkede* barene. Den siste baren i `this.bars` inneholder
+   * Bare de *lukkede* barene. Den siste baren fra `barsStore` inneholder
    * handelen som nettopp kom inn og er per definisjon ufullstendig.
    *
    * Dette er strukturklokken slik spec 2.1 beskriver den. Uten kuttet kjørte
@@ -198,7 +223,7 @@ export class Observer {
    * en `zoneTop` 4,9 % for lav, altså en halv sonebredde feil.
    */
   private closedBars(): Bar[] {
-    return this.bars.slice(0, -1)
+    return this.barsStore.bars().slice(0, -1)
   }
 
   /** Sluttprisen på siste lukkede bar, for ugyldiggjøring på lukking. */
@@ -291,7 +316,15 @@ export class Observer {
       return true
     }
 
-    if (!(spot > 0)) return true
+    if (!(spot > 0)) {
+      // Uten denne logglinjen er dette den eneste stien der mottiltaket
+      // slår seg av uten spor.
+      this.deps.log.warn(
+        { setupId, spot },
+        'poolens spotpris var ikke et brukbart tall — stoler på handelsprisen',
+      )
+      return true
+    }
     const divergence = Math.abs(price - spot) / spot
     if (divergence <= MAX_SPOT_DIVERGENCE) return true
 
@@ -305,6 +338,10 @@ export class Observer {
   private async evaluateAll(price: number, nowTs: number, replay: boolean): Promise<void> {
     const { strategy } = this.deps.config
 
+    // Løkkeinvariant, og `closedBars()` kopierer nå barene, så per-oppsett
+    // ville hvert oppsett betalt for 25 nye objekter.
+    const lastClose = this.lastClosedBarClose()
+
     for (const setup of this.deps.setups.activeForPool(this.deps.pool.address)) {
       const tr = evaluateSetup(setup, {
         price, nowTs,
@@ -312,7 +349,7 @@ export class Observer {
         maxSetupAgeBars: strategy.maxSetupAgeBars,
         minRR: strategy.minRR,
         tpPct: strategy.tpPct,
-        lastClosedBarClose: this.lastClosedBarClose(),
+        lastClosedBarClose: lastClose,
       })
 
       for (const level of tr.newAlerts) {
@@ -340,8 +377,21 @@ export class Observer {
       if (replay && !STRUCTURAL_TERMINAL.has(tr.state)) continue
 
       // Spec 6.7 mottiltak 2: en tilstandsendring er verdt ett uavhengig
-      // prisoppslag. Milepæler er det ikke.
-      if (!replay && !(await this.priceLooksReal(price, setup.id))) continue
+      // prisoppslag — men bare når prisen beslutningen er tatt på er *nå*.
+      //
+      // Trigger og RR-avvisning drives av ticken, og spot leses i samme
+      // øyeblikk, så de to måler samme størrelse. Ugyldiggjøring drives av en
+      // barlukking (spec 2.4), som er et historisk faktum: ingen nåtidslesning
+      // kan bekrefte den. Å måle den mot spot avviste ekte brudd — et oppsett
+      // hvis bein var brutt overlevde og sendte senere et `zone`-varsel — og
+      // gjorde oppsett udødelige, siden ugyldiggjøring sjekkes før alder og en
+      // avvisning derfor maskerte utløpet. Utløp har ingen pris i det hele tatt.
+      //
+      // Barlukkingen er dermed ubeskyttet av dette mottiltaket. Størrelses-
+      // filteret er det som står imot der, og det stopper ikke en manipulasjon
+      // i quote-token-skala. Se «Kjente grenser» i README.
+      const tickDriven = tr.state === 'TRIGGERED' || tr.state === 'REJECTED'
+      if (!replay && tickDriven && !(await this.priceLooksReal(price, setup.id))) continue
 
       this.deps.setups.upsert({ ...this.deps.setups.get(setup.id)!, state: tr.state })
 

@@ -204,18 +204,22 @@ import { z } from 'zod'
 
 const pct = z.number().positive().max(100)
 
+// Beløp i poolens quote-token, som desimaltall. Skaleres til rå kjede-enheter
+// med tokenets desimaler før sammenligning — se `toBaseUnits`.
+const quoteAmount = z.string().regex(/^\d+(\.\d+)?$/)
+
 export const StrategySchema = z.object({
   structureTimeframe: z.enum(['5m', '15m', '1h', '4h']),
   minSwingPct: pct,
   minSwingDurationMs: z.number().int().nonnegative(),
-  minSwingVolumeQuote: z.string(),
+  minSwingVolumeQuote: quoteAmount,   // desimaltall i quote-token, ikke rå enheter
   fibEntry: z.number().gt(0).lt(1),
   fibZoneTop: z.number().gt(0).lt(1),
   tpPct: pct,
   slBufferPct: pct,
   minRR: z.number().positive(),
   maxSetupAgeBars: z.number().int().positive(),
-  minTradeSizeQuote: z.string(),
+  minTradeSizeQuote: quoteAmount,
   alertLevels: z.array(z.number().gt(0).lt(1)).nonempty(),
 }).strict().refine((s) => s.fibZoneTop < s.fibEntry, {
   message: 'fibZoneTop må være grunnere enn fibEntry',
@@ -226,6 +230,9 @@ export const DataSchema = z.object({
   chainId: z.literal(4663),
   maxDataStalenessMs: z.number().int().positive(),
   backfillBlockRange: z.number().int().positive(),
+  // Minst fire bars: under det har svingdeteksjonen ikke nok å jobbe med, og
+  // den dør lydløst i stedet for å feile.
+  backfillLookbackBars: z.number().int().min(4),
   reorgDepthBlocks: z.number().int().nonnegative(),
 }).strict()
 
@@ -241,20 +248,24 @@ export const DEFAULT_CONFIG: Config = {
     structureTimeframe: '1h',
     minSwingPct: 15,
     minSwingDurationMs: 30_000,
-    minSwingVolumeQuote: '10000',
+    minSwingVolumeQuote: '3',        // ~10 000 USD i WETH
     fibEntry: 0.886,
     fibZoneTop: 0.786,
     tpPct: 60,
     slBufferPct: 2,
     minRR: 3,
     maxSetupAgeBars: 48,
-    minTradeSizeQuote: '50',
+    minTradeSizeQuote: '0.015',      // ~50 USD i WETH
     alertLevels: [0.5, 0.618, 0.786],
   },
   data: {
     chainId: 4663,
     maxDataStalenessMs: 10_000,
-    backfillBlockRange: 10_000,
+    // Målt: getLogs er begrenset på KALLANTALL, ikke vindusstørrelse — men
+    // har et eget tak på 10 000 resultater, som vindusstørrelsen halverer seg
+    // ned under.
+    backfillBlockRange: 500_000,
+    backfillLookbackBars: 24,
     reorgDepthBlocks: 20,
   },
 }
@@ -2549,8 +2560,12 @@ export class Observer {
 
   constructor(private deps: ObserverDeps) {
     this.intervalMs = timeframeMs(deps.config.strategy.structureTimeframe)
-    this.minTradeSize = BigInt(deps.config.strategy.minTradeSizeQuote)
-    this.minSwingVolume = BigInt(deps.config.strategy.minSwingVolumeQuote)
+    // Tersklene er skrevet i quote-token, men sammenlignes med
+    // `Trade.sizeQuote`, som er rå kjede-enheter. Uten skaleringen betyr
+    // '0.015' femten wei på et 18-desimalers token — altså ingen terskel.
+    const quoteDecimals = deps.pool.baseIsToken0 ? deps.pool.decimals1 : deps.pool.decimals0
+    this.minTradeSize = toBaseUnits(deps.config.strategy.minTradeSizeQuote, quoteDecimals)
+    this.minSwingVolume = toBaseUnits(deps.config.strategy.minSwingVolumeQuote, quoteDecimals)
   }
 
   async onTrade(trade: Trade): Promise<void> {

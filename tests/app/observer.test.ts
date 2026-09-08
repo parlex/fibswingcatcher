@@ -30,12 +30,17 @@ function observer(
     strategy: { ...DEFAULT_CONFIG.strategy, minSwingVolumeQuote: '0', minTradeSizeQuote: '0', ...overrides },
     data: { ...DEFAULT_CONFIG.data, ...dataOverrides },
   }
+  const logs = { info: [] as object[], warn: [] as object[], error: [] as object[] }
   const obs = new Observer({
     pool, label: 'TEST/WETH', config, setups, notifier,
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: {
+      info: (o) => { logs.info.push(o) },
+      warn: (o) => { logs.warn.push(o) },
+      error: (o) => { logs.error.push(o) },
+    },
     ...extra,
   })
-  return { obs, setups, notifier, db, config }
+  return { obs, setups, notifier, db, config, logs }
 }
 
 /** Som `observer()`, men med standardkonfigurasjonen ordrett — ingen nullede
@@ -271,22 +276,27 @@ describe('Observer', () => {
     expect(setups.allActive()).toHaveLength(1)
   })
 
-  it('handelsbufferet stabiliserer seg i stedet for å vokse uten tak', async () => {
+  it('minnet stabiliserer seg på bars, ikke på handler', async () => {
     const { obs } = observer()
-    // To handler per bar, én på barstart og én midt i baren. Vinduet er
-    // backfillLookbackBars (24) bars og kanten justeres ned til en barstart,
-    // så 25 hele bars × 2 handler = 50 beholdes.
+    // Rå handler beholdes ikke i det hele tatt: `detectSwings` tar bars og
+    // `evaluateSetup` tar en pris. Det bundne er derfor antall bars — 24 i
+    // vinduet pluss den kanten justeres ned til, altså 25 — uansett hvor
+    // travel poolen er.
     const feed = async (from: number, to: number) => {
       for (let i = from; i <= to; i++) {
-        await obs.onTrade(trade(i * H, 100 + (i % 5)))
-        await obs.onTrade(trade(i * H + H / 2, 100 + (i % 5)))
+        for (let k = 0; k < 20; k++) {
+          await obs.onTrade(trade(i * H + k * 90_000, 100 + (i % 5)))
+        }
       }
     }
-    await feed(1, 200)
-    const steady = obs.bufferedTrades
-    expect(steady).toBe(50)
-    await feed(201, 400)
-    expect(obs.bufferedTrades).toBe(steady)
+    await feed(1, 100)
+    expect(obs.retainedBars).toBe(25)
+    const acceptedAfterFirst = obs.accepted
+
+    await feed(101, 200)
+    // Bundet selv om dobbelt så mange handler har passert gjennom.
+    expect(obs.retainedBars).toBe(25)
+    expect(obs.accepted).toBe(acceptedAfterFirst * 2)
   })
 
   it('forkaster en handel eldre enn vinduet — verken husket eller evaluert', async () => {
@@ -299,14 +309,15 @@ describe('Observer', () => {
     await obs.onTrade(trade(111 * H, 195))
 
     const setupsBefore = setups.allActive()
-    const buffered = obs.bufferedTrades
+    const acceptedBefore = obs.accepted
     expect(setupsBefore).toHaveLength(1)
 
     // 61 bars tilbake, langt utenfor 24-bars vinduet, til en pris godt under
     // swing low — den ville ugyldiggjort oppsettet om den ble evaluert.
     await obs.onTrade(trade(50 * H, 10))
 
-    expect(obs.bufferedTrades).toBe(buffered)
+    expect(obs.accepted).toBe(acceptedBefore)
+    expect(obs.droppedOld).toBe(1)
     expect(setups.allActive()).toEqual(setupsBefore)
     expect(notifier.sent).toEqual([])
   })
@@ -326,8 +337,10 @@ describe('Observer', () => {
       await unbounded.obs.onTrade(t)
     }
 
-    // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort
-    expect(bounded.obs.bufferedTrades).toBe(seq.length)
+    // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort. `accepted`
+    // vitner om inngangsguarden, `retainedBars` om klippingen — begge trengs.
+    expect(bounded.obs.accepted).toBe(seq.length)
+    expect(bounded.obs.retainedBars).toBe(13)
     expect(bounded.setups.allActive()).toEqual(unbounded.setups.allActive())
     expect(bounded.notifier.sent).toEqual(unbounded.notifier.sent)
     expect(bounded.notifier.sent.length).toBeGreaterThan(0)
@@ -522,9 +535,9 @@ describe('Observer', () => {
       })
       // minTradeSizeQuote er '0.015': 0,014 skal falle, 0,016 skal telle
       await obs.onTrade(trade(1 * H, 130, 14n * oneToken / 1_000n))
-      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(0)
+      expect(obs.accepted, `${decimals} desimaler`).toBe(0)
       await obs.onTrade(trade(1 * H, 130, 16n * oneToken / 1_000n))
-      expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(1)
+      expect(obs.accepted, `${decimals} desimaler`).toBe(1)
     }
   })
 
@@ -565,6 +578,83 @@ describe('Observer', () => {
     await feedImpulse(obs)
     await obs.onTrade(trade(AFTER, 137))   // krysser 0.5 og 0.618, ingen overgang
     expect(reads).toBe(0)
+  })
+
+  it('logger når spotoppslaget gir en ubrukelig pris i stedet for å tie', async () => {
+    // Eneste stien der mottiltaket slår seg av uten spor: en ikke-positiv
+    // eller uparsbar spotpris ga `return true` uten en eneste logglinje.
+    const { obs, setups, logs } = observer({}, {}, { spotPrice: async () => '0' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+
+    expect(setups.allActive()[0]!.state).toBe('TRIGGERED')   // feiler fortsatt åpent
+    expect(logs.warn).toContainEqual(
+      expect.objectContaining({ spot: 0 }),                  // men ikke i stillhet
+    )
+  })
+
+  it('logger også når spotoppslaget gir noe som ikke er et tall', async () => {
+    const { obs, logs } = observer({}, {}, { spotPrice: async () => 'abc' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+    expect(logs.warn).toContainEqual(expect.objectContaining({ spot: NaN }))
+  })
+
+  it('et ekte strukturbrudd ugyldiggjør selv når prisen har hentet seg inn igjen', async () => {
+    // Spot-sjekken hører ikke på denne stien. Den validerer at en pris *nå*
+    // stemmer med poolen *nå*; en barlukking er et historisk faktum, og ingen
+    // nåtidslesning kan bekrefte den. Da barlukkingen ble sendt inn i
+    // toleransesjekken, ble et ekte brudd avvist fordi prisen hadde hentet seg
+    // inn — og oppsettet sendte senere et `zone`-varsel på et brutt bein.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '140' })
+    await feedImpulse(obs)
+
+    await feedBar(obs, 13, [130, 105])     // lukker på 105, under swing low 110
+    await obs.onTrade(trade(14 * H, 140))  // prisen er tilbake på 140
+
+    expect(setups.allActive()).toHaveLength(0)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(true)
+  })
+
+  it('en avvist overgang kan ikke gjøre et oppsett udødelig', async () => {
+    // Ugyldiggjøring sjekkes før alder, så en avvisning der maskerte utløpet.
+    const { obs, setups } = observer({}, {}, { spotPrice: async () => '1' })
+    await feedImpulse(obs)
+    expect(setups.allActive()).toHaveLength(1)
+
+    // Hver bar lukker under swing low (110), så ugyldiggjøring forsøkes hver
+    // gang — og med spot på 1 ville den blitt avvist hver gang.
+    for (let b = 14; b <= 70; b++) await obs.onTrade(trade(b * H, 105 - (b - 14)))
+    expect(setups.allActive()).toHaveLength(0)
+  })
+
+  it('utløper selv om spotprisen spriker — utløp er aldersdrevet, ikke prisdrevet', async () => {
+    // En sprikende spot skal ikke kunne holde et gammelt oppsett i live.
+    // Uten dette blokkerer en angriper som styrer spriket alle utløp, og
+    // aktive oppsett hoper seg opp for alltid.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '1' })
+    await feedImpulse(obs)
+    expect(setups.allActive()).toHaveLength(1)
+
+    await obs.onTrade(trade(61 * H, 140))   // godt forbi maxSetupAgeBars (48)
+
+    expect(setups.allActive()).toHaveLength(0)
+    // Entydig: det var utløp, ikke ugyldiggjøring, som avsluttet oppsettet.
+    expect(notifier.sent.some((a) => a.kind === 'expired')).toBe(true)
+  })
+
+  it('ugyldiggjør fortsatt når barlukkingen selv bekreftes av spotprisen', async () => {
+    // Kontrollen: at spot-sjekken er tatt av denne stien betyr ikke at
+    // ugyldiggjøring er skrudd av. Denne viser at et brudd med spot enig
+    // fortsatt dreper oppsettet.
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '100' })
+    await feedImpulse(obs)
+
+    await feedBar(obs, 13, [105, 100])     // ekte sammenbrudd, spot er enig
+    await obs.onTrade(trade(14 * H, 101))
+
+    expect(setups.allActive()).toHaveLength(0)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(true)
   })
 
   it('en støvhandel i sonen trigger ingenting', async () => {
