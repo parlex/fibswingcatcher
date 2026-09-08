@@ -17,8 +17,9 @@
 - **Node 22+, ESM** (`"type": "module"`). Verifisert lokalt: v22.6.0.
 - **TypeScript strict.** `strict: true`, `noUncheckedIndexedAccess: true`, `exactOptionalPropertyTypes: true`.
 - **Ingen magiske tall i koden.** Hver terskel kommer fra config-skjemaet i Task 1.
-- **Priser og mengder er `bigint` eller `Decimal`-strenger, aldri `number`.** Et token med 18 desimaler overskrider `Number.MAX_SAFE_INTEGER`. Kun avledede forholdstall (prosent, RR) er `number`.
-- **Rene moduler rører aldri IO.** `src/bars/`, `src/strategy/` og `src/alerts/milestones.ts` importerer ikke `viem`, `better-sqlite3`, `node:fs` eller `grammy`. Håndheves av en test i Task 1.
+- **Rå tokenmengder er alltid `bigint`.** Et token med 18 desimaler overskrider `Number.MAX_SAFE_INTEGER`.
+- **Priser som krysser en modulgrense er desimalstrenger** (`Trade.priceQuote`, `Bar.open/high/low/close`, `Swing.low/high`). Innenfor strategilaget regnes avledet fib-aritmetikk i `number` — nivåer, avstander og RR er forholdstall der 15–17 signifikante siffer er rikelig, og der `bigint` ville gjort koden uleselig uten å gjøre den riktigere.
+- **Rene moduler rører aldri IO.** `src/bars/`, `src/strategy/` og `src/alerts/format.ts` importerer ikke `viem`, `better-sqlite3`, `node:fs` eller `grammy`. Håndheves av en test i Task 1.
 - **Chain:** Robinhood Chain, chain ID **4663**, HTTP RPC `https://rpc.mainnet.chain.robinhood.com`, gass i ETH.
 - **Ingen hemmeligheter i repoet.** Telegram-token og RPC-nøkler leses fra `.env`, som er i `.gitignore`.
 - **Denne planen sender aldri en transaksjon.** Ingen `walletClient`, ingen privatnøkkel, ingen signering. Kun lesing.
@@ -485,7 +486,7 @@ git commit -m "feat: BarAggregator som bygger OHLCV fra rå handler"
 **Interfaces:**
 - Consumes: `Bar`, `Swing`
 - Produces: `function detectSwings(bars: Bar[], opts: SwingOpts): Swing[]` der
-  `type SwingOpts = { minSwingPct: number; minSwingDurationMs: number; minSwingVolumeQuote: bigint; intervalMs: number }`
+  `type SwingOpts = { minSwingPct: number; minSwingDurationMs: number; minSwingVolumeQuote: bigint }`
 
 Algoritmen: gå gjennom bars kronologisk og hold et løpende ekstrempunkt. Er vi i en **nedtrend**, oppdateres kandidatbunnen så lenge nye lavere lows kommer. Når en bar lager en `high` som ligger `minSwingPct` over kandidatbunnen, er bunnen **bekreftet** og vi snur til opptrend. Et bein rapporteres som `Swing` først når både bunn og topp er bekreftet, og beinet passerer terskelene for varighet og volum.
 
@@ -507,7 +508,6 @@ const OPTS = {
   minSwingPct: 15,
   minSwingDurationMs: 0,
   minSwingVolumeQuote: 0n,
-  intervalMs: H,
 }
 
 let seq = 0
@@ -629,7 +629,6 @@ export type SwingOpts = {
   minSwingPct: number
   minSwingDurationMs: number
   minSwingVolumeQuote: bigint
-  intervalMs: number
 }
 
 type Pivot = { ts: number; price: number }
@@ -2452,7 +2451,7 @@ describe('Observer', () => {
     const { obs, notifier } = observer()
     await feedImpulse(obs)
     await obs.onTrade(trade(12 * H, 137))
-    await obs.onTrade(trade(12 * H + 1_000, 112))   // wick ned i sonen
+    await obs.onTrade(trade(12 * H + 1_000, 125))   // wick ned i sonen (120.26–129.26)
     await obs.onTrade(trade(12 * H + 11_000, 140))  // og ut igjen
     expect(notifier.sent.some((a) => a.kind === 'zone')).toBe(true)
   })
@@ -2587,7 +2586,6 @@ export class Observer {
       minSwingPct: strategy.minSwingPct,
       minSwingDurationMs: strategy.minSwingDurationMs,
       minSwingVolumeQuote: this.minSwingVolume,
-      intervalMs: this.intervalMs,
     })
 
     const latest = swings.at(-1)
