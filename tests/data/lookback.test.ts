@@ -65,11 +65,24 @@ describe('lookbackFrom', () => {
     expect(d.fromBlock).toBeGreaterThan(0n)
   })
 
-  it('taket på takten biter før tilbakeblikket kan nå kjedehøyden', () => {
-    // Den gamle verdien 1 blokk/ms ga nøyaktig fromBlock 0n. Nå klampes den.
-    const d = lookbackFrom(LATEST, 1, LOOKBACK_MS)
-    expect(d.fromBlock).toBeGreaterThan(0n)
+  it('invariant: taket på takten ligger under den takten som ga genesis', () => {
+    // Den gamle verdien 1 blokk/ms lå 1,5x OVER 0,6698 og hindret dermed ikke
+    // fromBlock 0n i det hele tatt. Dette er relasjonen som må holde.
     expect(MAX_BLOCKS_PER_MS).toBeLessThan(Number(LATEST) / LOOKBACK_MS)
+    expect(lookbackFrom(LATEST, 1, LOOKBACK_MS).fromBlock).toBeGreaterThan(0n)
+  })
+
+  it('taket på takten biter der kjedetaket ikke skygger for det', () => {
+    // Med 24 bars skygger kjedetaket helt for takt-taket: en klampet takt gir
+    // 8 640 000 blokker, som fortsatt er over kjedetaket på 5 786 968, så
+    // vernet overtar. Med 4 bars slipper den klampede takten under, og da er
+    // klampingen synlig i svaret.
+    const shortLookbackMs = 4 * 3_600_000
+    const d = lookbackFrom(LATEST, 100, shortLookbackMs)
+    expect(d.rateSource).toBe('clamped')
+    expect(d.guarded).toBe(false)
+    expect(d.blocksPerMs).toBe(MAX_BLOCKS_PER_MS)
+    expect(d.lookbackBlocks).toBe(1_440_000n)
   })
 
   it('slipper gjennom en takt så vidt under kjedetaket', () => {
