@@ -4,13 +4,14 @@ import { type PublicClient, createPublicClient, webSocket } from 'viem'
 import { DEFAULT_CONFIG } from '../config/schema.js'
 import { timeframeMs } from '../bars/aggregator.js'
 import { robinhoodChain, publicClient } from '../chain/client.js'
-import { loadPoolMeta } from '../data/pool.js'
+import { type PoolMeta, loadPoolMeta } from '../data/pool.js'
 import { LiveStream } from '../data/live.js'
 import { backfillTrades } from '../data/backfill.js'
 import { SWAP_EVENT, toBlockLog, viemLogReader } from '../data/viem.js'
 import { migrate, openDb } from '../store/db.js'
-import { SetupStore, WatchlistStore } from '../store/setups.js'
+import { SetupStore, WatchlistStore, type WatchlistEntry } from '../store/setups.js'
 import { NullNotifier } from '../alerts/types.js'
+import { MutableNotifier } from '../alerts/mute.js'
 import { TelegramNotifier, grammySender } from '../alerts/telegram.js'
 import { Observer } from './observer.js'
 
@@ -61,7 +62,7 @@ if (entries.length === 0) {
 }
 
 const labels = new Map(entries.map((e) => [e.poolAddress.toLowerCase(), e.label]))
-const notifier = process.env.TELEGRAM_BOT_TOKEN
+const sink = process.env.TELEGRAM_BOT_TOKEN
   ? new TelegramNotifier({
       send: grammySender(process.env.TELEGRAM_BOT_TOKEN),
       chatId: requireEnv('TELEGRAM_CHAT_ID'),
@@ -70,12 +71,18 @@ const notifier = process.env.TELEGRAM_BOT_TOKEN
     })
   : new NullNotifier()
 
-if (notifier instanceof NullNotifier) {
+if (sink instanceof NullNotifier) {
   log.warn({}, 'TELEGRAM_BOT_TOKEN mangler — varsler går ingen steder')
 }
 
+// Dempet gjennom replayen av historikk, sluppet løs når strømmene starter.
+// Replayen gjenskaper hele hendelsesforløpet på nytt, og uten dempingen ville
+// hver omstart sendt en byge av varsler for kurs som beveget seg for timer
+// siden. Nivåene registreres i basen uansett, så ingenting varsles dobbelt
+// senere.
+const notifier = new MutableNotifier(sink, true)
+
 const reader = viemLogReader(http)
-const streams: LiveStream[] = []
 
 const latest = await http.getBlockNumber()
 const perMs = await blocksPerMs(http, latest)
@@ -87,6 +94,9 @@ log.info(
   { latest, fromBlock, bars: lookbackBars, blokkerPerSekund: Math.round(perMs * 1_000) },
   'tilbakeblikk beregnet',
 )
+
+type Wired = { entry: WatchlistEntry; meta: PoolMeta; observer: Observer }
+const wired: Wired[] = []
 
 for (const entry of entries) {
   const meta = await loadPoolMeta(http, entry.poolAddress, entry.quoteToken)
@@ -101,6 +111,27 @@ for (const entry of entries) {
   log.info({ pool: entry.label, trades: history.length }, 'backfill ferdig')
   for (const t of history) await observer.onTrade(t)
 
+  wired.push({ entry, meta, observer })
+}
+
+// Det ene dempingen koster, er at et oppsett som *alt* står i sonen ved
+// oppstart ikke pushes. Derfor logges tilstanden, slik at operatøren ser den.
+for (const setup of setups.allActive()) {
+  log.info(
+    {
+      id: setup.id, state: setup.state,
+      sone: [setup.levels.zoneBottom, setup.levels.zoneTop],
+      varslet: setup.alertsSent,
+    },
+    'aktivt oppsett etter replay',
+  )
+}
+
+notifier.unmute()
+
+const streams: LiveStream[] = []
+
+for (const { entry, meta, observer } of wired) {
   const stream = new LiveStream({
     subscribe: (onLog, onError) =>
       ws.watchEvent({
