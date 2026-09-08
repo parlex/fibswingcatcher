@@ -473,14 +473,14 @@ per-token-overstyring. Ingen magiske tall i koden.
 | `structureTimeframe` | `1h` | Tidsramme for swings og fib |
 | `minSwingPct` | 15 % | Minste bevegelse som teller som bein |
 | `minSwingDurationMs` | 30 000 | Minste varighet på et bein |
-| `minSwingVolume` | konfig | Minste volum i et bein |
+| `minSwingVolume` | 10 000 USD | Minste volum i et bein |
 | `fibEntry` | 0.886 | Bunn av entry-sonen |
 | `fibZoneTop` | 0.786 | Topp av entry-sonen, dårligste fyll |
 | `tpPct` | 60 % | Take profit |
 | `slBufferPct` | 2 % | Under swingbunnen |
 | `minRR` | 3.0 | Minste akseptable RR |
 | `maxSetupAgeBars` | 48 | Levetid for oppsett og armering |
-| `minTradeSizeUsd` | konfig | Handler under dette ignoreres |
+| `minTradeSizeUsd` | 50 USD | Handler under dette ignoreres i bars og som trigger |
 
 ### Risiko
 
@@ -498,17 +498,17 @@ per-token-overstyring. Ingen magiske tall i koden.
 | `minLiquidityUsd` | 50 000 |
 | `maxTokenTaxPct` | 3 % |
 | `maxRoundTripCostPct` | 1,5 % |
-| `minNotionalUsd` | konfig |
-| `gasReserveEth` | konfig |
+| `minNotionalUsd` | 200 USD |
+| `gasReserveEth` | 0,01 ETH |
 
 ### Eksekvering og drift
 
 | Parameter | Default |
 |---|---|
 | `maxEntrySlippagePct` | 0,5 % |
-| `maxExitSlippagePct` | konfig, trappes opp ved retry |
-| `txTimeoutMs` | konfig |
-| `maxDataStalenessMs` | konfig |
+| `maxExitSlippagePct` | 1 % start, trappes til 5 % over retries |
+| `txTimeoutMs` | 15 000 |
+| `maxDataStalenessMs` | 10 000 |
 | `automationMode` | `observe` |
 | `executionMode` | `paper` |
 
