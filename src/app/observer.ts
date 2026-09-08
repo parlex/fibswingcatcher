@@ -125,6 +125,12 @@ export class Observer {
     // Et provisorisk bein kan utvide toppen sin. Da er det gamle oppsettet
     // tegnet fra feil topp og må vike, ellers samler det seg opp foreldede
     // fib-nivåer for samme bunn.
+    //
+    // Denne opprydningen kjører også under replay, og er det ene stedet
+    // historikk får sette EXPIRED. Det er strukturbokføring, ikke en
+    // evaluerings-overgang: uten den ville replayen etterlatt ett foreldet
+    // oppsett per utvidelse, og den første levende handelen hadde evaluert
+    // dem alle og sendt nettopp den bygen replay-modusen finnes for å hindre.
     for (const old of this.deps.setups.allActive()) {
       if (old.poolAddress === setup.poolAddress && old.swing.lowTs === latest.lowTs) {
         this.deps.setups.upsert({ ...old, state: 'EXPIRED' })
