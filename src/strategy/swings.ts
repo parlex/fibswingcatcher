@@ -6,7 +6,12 @@ export type SwingOpts = {
   minSwingVolumeQuote: bigint
 }
 
-type Pivot = { ts: number; price: number }
+// `price` is a Number() projection used only for threshold comparisons, per
+// this project's precision rule. `raw` is the decimal string exactly as it
+// arrived on the Bar, and is what ultimately gets emitted on the Swing — a
+// Swing's low/high must never round-trip through Number(), which silently
+// mangles small or long decimals (e.g. '0.00000012345' -> '1.2345e-7').
+type Pivot = { ts: number; price: number; raw: string }
 
 export function detectSwings(bars: Bar[], opts: SwingOpts): Swing[] {
   const swings: Swing[] = []
@@ -14,8 +19,8 @@ export function detectSwings(bars: Bar[], opts: SwingOpts): Swing[] {
 
   const threshold = opts.minSwingPct / 100
   let direction: 'down' | 'up' = 'down'
-  let candidateLow: Pivot = { ts: bars[0]!.openTs, price: Number(bars[0]!.low) }
-  let candidateHigh: Pivot = { ts: bars[0]!.openTs, price: Number(bars[0]!.high) }
+  let candidateLow: Pivot = { ts: bars[0]!.openTs, price: Number(bars[0]!.low), raw: bars[0]!.low }
+  let candidateHigh: Pivot = { ts: bars[0]!.openTs, price: Number(bars[0]!.high), raw: bars[0]!.high }
   let confirmedLow: Pivot | undefined
   // Timestamp of the bar that broke the up-confirmation threshold (down -> up
   // flip), i.e. the bar that confirmed this leg's bottom. Set once per leg and
@@ -33,7 +38,7 @@ export function detectSwings(bars: Bar[], opts: SwingOpts): Swing[] {
 
     if (direction === 'down') {
       if (low < candidateLow.price) {
-        candidateLow = { ts: b.openTs, price: low }
+        candidateLow = { ts: b.openTs, price: low, raw: b.low }
         volumeSinceLow = 0n
       }
       volumeSinceLow += b.volumeQuote
@@ -41,27 +46,33 @@ export function detectSwings(bars: Bar[], opts: SwingOpts): Swing[] {
       if (high >= candidateLow.price * (1 + threshold)) {
         direction = 'up'
         confirmedLow = candidateLow
-        candidateHigh = { ts: b.openTs, price: high }
+        candidateHigh = { ts: b.openTs, price: high, raw: b.high }
         legConfirmedAtTs = b.openTs
       }
     } else {
-      if (high > candidateHigh.price) candidateHigh = { ts: b.openTs, price: high }
-      volumeSinceLow += b.volumeQuote
+      if (high > candidateHigh.price) candidateHigh = { ts: b.openTs, price: high, raw: b.high }
 
       if (low <= candidateHigh.price * (1 - threshold) && confirmedLow) {
         const duration = candidateHigh.ts - confirmedLow.ts
         if (duration >= opts.minSwingDurationMs && volumeSinceLow >= opts.minSwingVolumeQuote) {
           swings.push({
-            lowTs: confirmedLow.ts, low: String(confirmedLow.price),
-            highTs: candidateHigh.ts, high: String(candidateHigh.price),
+            lowTs: confirmedLow.ts, low: confirmedLow.raw,
+            highTs: candidateHigh.ts, high: candidateHigh.raw,
             confirmedAtTs: legConfirmedAtTs,
             provisional: false,
           })
         }
         direction = 'down'
-        candidateLow = { ts: b.openTs, price: low }
-        volumeSinceLow = 0n
+        // This bar is the one that establishes the new candidate low, so its
+        // own volume belongs to the leg that starts here — not to the leg
+        // that just closed. Mirrors the down-branch: a bar that moves the
+        // candidate low resets the accumulator to that bar's own volume,
+        // never to the volume of the leg it displaces.
+        candidateLow = { ts: b.openTs, price: low, raw: b.low }
+        volumeSinceLow = b.volumeQuote
         confirmedLow = undefined
+      } else {
+        volumeSinceLow += b.volumeQuote
       }
     }
   }
@@ -70,8 +81,8 @@ export function detectSwings(bars: Bar[], opts: SwingOpts): Swing[] {
     const duration = candidateHigh.ts - confirmedLow.ts
     if (duration >= opts.minSwingDurationMs && volumeSinceLow >= opts.minSwingVolumeQuote) {
       swings.push({
-        lowTs: confirmedLow.ts, low: String(confirmedLow.price),
-        highTs: candidateHigh.ts, high: String(candidateHigh.price),
+        lowTs: confirmedLow.ts, low: confirmedLow.raw,
+        highTs: candidateHigh.ts, high: candidateHigh.raw,
         confirmedAtTs: legConfirmedAtTs,
         provisional: true,
       })

@@ -28,6 +28,8 @@ describe('detectSwings', () => {
     expect(swings).toHaveLength(1)
     expect(swings[0]!.low).toBe('90')
     expect(swings[0]!.high).toBe('130')
+    expect(swings[0]!.lowTs).toBe(2 * H)
+    expect(swings[0]!.highTs).toBe(3 * H)
   })
 
   it('merker et pågående bein som provisorisk', () => {
@@ -85,6 +87,72 @@ describe('detectSwings', () => {
     const bars = [bar(100, 105), bar(90, 95), bar(95, 130), bar(125, 200)]
     const swings = detectSwings(bars, OPTS)
     expect(swings[0]!.confirmedAtTs).toBe(3 * H)
+  })
+
+  it('nullstiller volumeSinceLow når kandidatbunnen flytter seg videre ned', () => {
+    reset()
+    // Uten nullstillingen når candidateLow flytter seg ned, ville det store
+    // volumet fra baren FØR bunnen flyttet seg (10_000n) lekke inn i beinet
+    // som til slutt bekreftes, og terskelen på 3n ville feilaktig bli passert
+    // (10_000n+1n+1n=10_002n) i stedet for korrekt avvist (1n+1n=2n).
+    const bars = [bar(100, 102, 10_000n), bar(50, 55, 1n), bar(55, 90, 1n)]
+    const strict = { ...OPTS, minSwingVolumeQuote: 3n }
+    expect(detectSwings(bars, strict)).toEqual([])
+  })
+
+  it('nullstiller volumeSinceLow når retningen snur tilbake til ned', () => {
+    reset()
+    // Bein 1 bekreftes med et stort volum (10_000n) ved bar 3 (som også
+    // flipper retningen tilbake til ned). Uten nullstilling ved den flippen
+    // ville dette store volumet lekke inn i bein 2, som ellers korrekt
+    // avvises (2n < 3n) men feilaktig ville passere (10_001n >= 3n).
+    const bars = [
+      bar(100, 105), bar(90, 95), bar(95, 130, 10_000n),
+      bar(100, 105, 1n), bar(105, 120, 1n),
+    ]
+    const strict = { ...OPTS, minSwingVolumeQuote: 3n }
+    expect(detectSwings(bars, strict)).toHaveLength(1)
+  })
+
+  it('lar baren som etablerer den nye kandidatbunnen telle mot det nye beinet, ikke det gamle', () => {
+    reset()
+    // Bein 1 (50->90) lukkes av bar 4, som samtidig ER lavpunktet for bein 2
+    // (60->120). Bar 4 sitt volum (1000n) skal telle mot bein 2, ikke bein 1.
+    const bars = [
+      bar(100, 105, 0n), bar(50, 55, 0n), bar(55, 90, 0n),
+      bar(60, 65, 1000n), bar(65, 120, 0n),
+    ]
+    const strict = { ...OPTS, minSwingVolumeQuote: 500n }
+    const swings = detectSwings(bars, strict)
+    // Bein 1 har volumeSinceLow=0 (bar 4 sitt volum tilhører ikke bein 1) og
+    // avvises derfor på 500n-terskelen. Bein 2 har volumeSinceLow=1000n
+    // (starter med bar 4 sitt volum) og godkjennes.
+    expect(swings).toHaveLength(1)
+    expect(swings[0]!.low).toBe('60')
+  })
+
+  it('bevarer desimalpresisjonen i low/high (ingen Number-avrunding)', () => {
+    reset()
+    const barExact = (low: string, high: string, volume = 1_000_000n): Bar => {
+      const openTs = ++seq * H
+      return {
+        openTs,
+        open: low, high, low, close: high,
+        volumeQuote: volume, tradeCount: 10,
+      }
+    }
+    // '0.00000012345' ville blitt til '1.2345e-7' hvis verdien noen gang gikk
+    // via Number() på vei ut. minSwingPct=15%: 0.00000012345*1.15=0.0000001419675.
+    const bars = [
+      barExact('0.00000012345', '0.00000013'),
+      barExact('0.00000013', '0.00000015'),
+      barExact('0.0000001', '0.00000015'),
+    ]
+    const swings = detectSwings(bars, OPTS)
+    const confirmed = swings.filter((s) => !s.provisional)
+    expect(confirmed).toHaveLength(1)
+    expect(confirmed[0]!.low).toBe('0.00000012345')
+    expect(confirmed[0]!.high).toBe('0.00000015')
   })
 })
 
