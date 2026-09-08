@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import pino from 'pino'
-import { type PublicClient, createPublicClient, webSocket } from 'viem'
+import { createPublicClient, webSocket } from 'viem'
 import { DEFAULT_CONFIG } from '../config/schema.js'
 import { timeframeMs } from '../bars/aggregator.js'
 import { robinhoodChain, publicClient } from '../chain/client.js'
@@ -8,6 +8,7 @@ import { type PoolMeta, loadPoolMeta } from '../data/pool.js'
 import { LiveStream } from '../data/live.js'
 import { backfillTrades } from '../data/backfill.js'
 import { SWAP_EVENT, isResultLimitError, toBlockLog, viemLogReader } from '../data/viem.js'
+import { lookbackFrom, measureBlocksPerMs } from '../data/lookback.js'
 import { migrate, openDb } from '../store/db.js'
 import { SetupStore, WatchlistStore, type WatchlistEntry } from '../store/setups.js'
 import { NullNotifier } from '../alerts/types.js'
@@ -23,47 +24,6 @@ function requireEnv(name: string): string {
     process.exit(1)
   }
   return value
-}
-
-/**
- * Bevisst under den målte takten på ~10 blokker/sekund. Bommer målingen, skal
- * tilbakeblikket bli for *kort* — et for kort tilbakeblikk gir tynn struktur,
- * et for langt gir en kjedeskanning som aldri fullfører.
- */
-const FALLBACK_BLOCKS_PER_MS = 1 / 1_000
-
-/**
- * Tak: ingen kjede lager tusen blokker i sekundet. Uten taket kan en
- * degenerert måling — to blokker med samme eller nesten samme tidsstempel —
- * blåse tilbakeblikket forbi kjedehøyden, `fromBlock` faller til 0, og
- * oppstarten blir en full skanning av 57 millioner blokker.
- */
-const MAX_BLOCKS_PER_MS = 1
-
-/**
- * Tilbakeblikket er uttrykt i tid, ikke i blokker, og regnes om via en målt
- * blokktakt. Robinhood Chain lager en blokk hvert tiendedels sekund, så en
- * hardkodet «3600 blokker per time» ville bommet med en faktor ti — og den
- * ville dessuten vært feil for enhver annen strukturtidsramme enn 1h.
- */
-async function blocksPerMs(client: PublicClient, latest: bigint): Promise<number> {
-  const span = latest > 100_000n ? 100_000n : latest
-  if (span === 0n) return FALLBACK_BLOCKS_PER_MS
-  const [older, newest] = await Promise.all([
-    client.getBlock({ blockNumber: latest - span }),
-    client.getBlock({ blockNumber: latest }),
-  ])
-  const elapsedMs = (Number(newest.timestamp) - Number(older.timestamp)) * 1_000
-  if (elapsedMs <= 0) {
-    log.warn({ span, elapsedMs }, 'kunne ikke måle blokktakt — bruker forsiktig fallback')
-    return FALLBACK_BLOCKS_PER_MS
-  }
-  const measured = Number(span) / elapsedMs
-  if (measured > MAX_BLOCKS_PER_MS) {
-    log.warn({ measured }, 'urimelig blokktakt målt — klamper ned')
-    return MAX_BLOCKS_PER_MS
-  }
-  return measured
 }
 
 const httpUrl = requireEnv('RPC_HTTP_URL')
@@ -128,13 +88,36 @@ process.on('uncaughtException', (err) => {
 
 async function start(): Promise<void> {
   const latest = await http.getBlockNumber()
-  const perMs = await blocksPerMs(http, latest)
   const lookbackBars = DEFAULT_CONFIG.data.backfillLookbackBars
   const lookbackMs = lookbackBars * timeframeMs(DEFAULT_CONFIG.strategy.structureTimeframe)
-  const lookbackBlocks = BigInt(Math.ceil(lookbackMs * perMs))
-  const fromBlock = latest > lookbackBlocks ? latest - lookbackBlocks : 0n
+  const lookback = lookbackFrom(latest, await measureBlocksPerMs(http, latest), lookbackMs)
+  const { fromBlock } = lookback
+
+  if (lookback.guarded) {
+    log.error(
+      {
+        maalt: lookback.measuredBlocksPerMs,
+        brukt: lookback.blocksPerMs,
+        lookbackBlocks: lookback.lookbackBlocks,
+        latest,
+      },
+      'blokktakten ser feil ut — bruker et kort, forsiktig tilbakeblikk framfor å skanne kjeden',
+    )
+  } else if (lookback.rateSource !== 'measured') {
+    log.warn(
+      { maalt: lookback.measuredBlocksPerMs, brukt: lookback.blocksPerMs, kilde: lookback.rateSource },
+      'blokktakten kunne ikke måles pålitelig',
+    )
+  }
+
   log.info(
-    { latest, fromBlock, bars: lookbackBars, blokkerPerSekund: Math.round(perMs * 1_000) },
+    {
+      latest, fromBlock,
+      lookbackBlocks: lookback.lookbackBlocks,
+      bars: lookbackBars,
+      blokkerPerSekund: Math.round(lookback.blocksPerMs * 1_000),
+      kilde: lookback.rateSource,
+    },
     'tilbakeblikk beregnet',
   )
 

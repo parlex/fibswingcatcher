@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Observer } from '../../src/app/observer.js'
 import { DEFAULT_CONFIG } from '../../src/config/schema.js'
 import { NullNotifier } from '../../src/alerts/types.js'
+import type { Notifier } from '../../src/alerts/types.js'
 import { SetupStore } from '../../src/store/setups.js'
 import { migrate, openDb } from '../../src/store/db.js'
 import type { PoolMeta } from '../../src/data/pool.js'
@@ -383,14 +384,14 @@ describe('Observer', () => {
       strategy: { ...DEFAULT_CONFIG.strategy, minSwingVolumeQuote: '0', minTradeSizeQuote: '0' },
     }
     const sent: string[] = []
-    const slow = {
-      async send(a: { kind: string; level?: number }) {
+    const slow: Notifier = {
+      async send(a) {
         await new Promise((r) => setTimeout(r, 20))
-        sent.push(`${a.kind}${a.level ?? ''}`)
+        sent.push(a.kind === 'milestone' ? `milestone${a.level}` : a.kind)
       },
     }
     const obs = new Observer({
-      pool, label: 'TEST/WETH', config, setups, notifier: slow as never,
+      pool, label: 'TEST/WETH', config, setups, notifier: slow,
       log: { info: () => {}, warn: () => {}, error: () => {} },
     })
 

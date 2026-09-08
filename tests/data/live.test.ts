@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { encodeAbiParameters } from 'viem'
 import { LiveStream, type StreamEvent } from '../../src/data/live.js'
 import type { PoolMeta } from '../../src/data/pool.js'
+import type { BlockLog } from '../../src/data/backfill.js'
 
 const meta: PoolMeta = {
   address: '0x1111111111111111111111111111111111111111',
@@ -23,24 +24,24 @@ const mkLog = (logIndex: number, opts: { txHash?: string; blockNumber?: bigint }
 })
 
 function harness(maxStalenessMs = 10_000, reorgDepthBlocks = 20) {
-  let onLog: ((l: ReturnType<typeof mkLog>) => void) | undefined
+  let onLog: ((l: BlockLog) => void) | undefined
   let onError: ((e: Error) => void) | undefined
   let clock = 0
   const timers: { fn: () => void; at: number }[] = []
   const events: StreamEvent[] = []
   const calls: { onLog: typeof onLog; onError: typeof onError }[] = []
   const unsubscribe = vi.fn()
-  const subscribe = vi.fn((l: typeof onLog, e: typeof onError) => {
+  const subscribe = vi.fn((l: (log: BlockLog) => void, e: (err: Error) => void) => {
     onLog = l; onError = e
     calls.push({ onLog: l, onError: e })
     return unsubscribe
   })
 
   const setTimer = vi.fn((fn: () => void, ms: number) => { const t = { fn, at: clock + ms }; timers.push(t); return t })
-  const clearTimer = vi.fn((t: unknown) => { const i = timers.indexOf(t as never); if (i >= 0) timers.splice(i, 1) })
+  const clearTimer = vi.fn((t: unknown) => { const i = timers.findIndex((x) => x === t); if (i >= 0) timers.splice(i, 1) })
 
   const stream = new LiveStream({
-    subscribe: subscribe as never,
+    subscribe,
     now: () => clock,
     setTimer,
     clearTimer,
@@ -163,7 +164,7 @@ describe('LiveStream', () => {
 
   it('sender ikke en trade som ble mottatt før stop, men hvis blockTs fortsatt er i flukt', async () => {
     let resolveTs: (v: number) => void = () => {}
-    let onLog: ((l: ReturnType<typeof mkLog>) => void) | undefined
+    let onLog: ((l: BlockLog) => void) | undefined
     let onError: ((e: Error) => void) | undefined
     let clock = 0
     const timers: { fn: () => void; at: number }[] = []
@@ -171,10 +172,10 @@ describe('LiveStream', () => {
     const unsubscribe = vi.fn()
     const subscribe = vi.fn((l: typeof onLog, e: typeof onError) => { onLog = l; onError = e; return unsubscribe })
     const stream = new LiveStream({
-      subscribe: subscribe as never,
+      subscribe,
       now: () => clock,
       setTimer: (fn: () => void, ms: number) => { const t = { fn, at: clock + ms }; timers.push(t); return t },
-      clearTimer: (t: unknown) => { const i = timers.indexOf(t as never); if (i >= 0) timers.splice(i, 1) },
+      clearTimer: (t: unknown) => { const i = timers.findIndex((x) => x === t); if (i >= 0) timers.splice(i, 1) },
       maxStalenessMs: 10_000,
       meta,
       reorgDepthBlocks: 20,
