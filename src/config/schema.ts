@@ -10,6 +10,12 @@ const pct = z.number().positive().max(100)
  * begge kastet en rå `SyntaxError` fra `BigInt()` inne i `Observer`-
  * konstruktøren, altså etter oppstart og langt fra årsaken. Skaleringen til
  * kjedens enheter skjer i `toBaseUnits`, som trenger et tall den kan stole på.
+ *
+ * **Verdien er pool-avhengig.** Den er i quote-token, og en WETH-pool og en
+ * USDC-pool har ikke samme tall for samme mengde penger. Defaultene under er
+ * stilt for WETH; peker du boten på en stablecoin-pool må de stilles om, ellers
+ * er terskelen enten meningsløst lav eller så høy at ingen handel slipper
+ * gjennom. Et prisorakel, som ville gjort USD mulig, hører til plan 3.
  */
 const quoteAmount = z.string().regex(/^\d+(\.\d+)?$/, {
   message: 'må være en tokenmengde med siffer og eventuelt ett desimalpunkt, f.eks. "50" eller "0.5"',
@@ -72,14 +78,22 @@ export const DEFAULT_CONFIG: Config = {
     structureTimeframe: '1h',
     minSwingPct: 15,
     minSwingDurationMs: 30_000,
-    minSwingVolumeQuote: '10000',
+    // Se kommentaren på `quoteAmount`: disse er i quote-token, ikke USD, og
+    // må stilles om når quote-tokenet ikke er WETH.
+    //
+    // Specens tall er 10 000 USD og 50 USD. Uttrykt i WETH til ~3 300 USD/ETH
+    // blir det ~3 og ~0,015. Målt på poolen røyktesten bruker: 807 handler
+    // over 24 bars med medianstørrelse 0,00058 WETH, p90 0,085 og totalt 19,7
+    // WETH omsatt. Terskelen 0,015 slipper gjennom om lag 15 % av handlene —
+    // halen som faktisk er prisdannelse — mens 50 slapp gjennom **0 av 807**.
+    minSwingVolumeQuote: '3',
     fibEntry: 0.886,
     fibZoneTop: 0.786,
     tpPct: 60,
     slBufferPct: 2,
     minRR: 3,
     maxSetupAgeBars: 48,
-    minTradeSizeQuote: '50',
+    minTradeSizeQuote: '0.015',
     alertLevels: [0.5, 0.618, 0.786],
   },
   data: {

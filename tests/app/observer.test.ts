@@ -520,10 +520,10 @@ describe('Observer', () => {
         notifier: new NullNotifier(),
         log: { info: () => {}, warn: () => {}, error: () => {} },
       })
-      // minTradeSizeQuote er '50': 49 tokens skal falle, 51 skal telle
-      await obs.onTrade(trade(1 * H, 130, 49n * oneToken))
+      // minTradeSizeQuote er '0.015': 0,014 skal falle, 0,016 skal telle
+      await obs.onTrade(trade(1 * H, 130, 14n * oneToken / 1_000n))
       expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(0)
-      await obs.onTrade(trade(1 * H, 130, 51n * oneToken))
+      await obs.onTrade(trade(1 * H, 130, 16n * oneToken / 1_000n))
       expect(obs.bufferedTrades, `${decimals} desimaler`).toBe(1)
     }
   })

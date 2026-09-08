@@ -312,7 +312,7 @@ Opprett tomme kataloger `src/bars/` og `src/strategy/` med en `.gitkeep` slik at
 I spec-seksjon 8, tabellen «Strategi», endre raden `minTradeSizeUsd` til:
 
 ```
-| `minTradeSizeQuote` | 50 (quote-token) | Handler under dette ignoreres i bars og som trigger. USD-konvertering innføres med prisorakelet i plan 3. |
+| `minTradeSizeQuote` | 0.015 (quote-token) | Handler under dette ignoreres i bars og som trigger. Verdien må uttrykkes i quote-token, ikke bare enheten: specens 50 USD er ~0,015 WETH, og tallet 50 tolket som WETH slipper gjennom 0 av 807 ekte handler. USD-konvertering innføres med prisorakelet i plan 3. |
 ```
 
 - [ ] **Step 9: Kjør alt og commit**

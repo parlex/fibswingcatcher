@@ -482,14 +482,14 @@ per-token-overstyring. Ingen magiske tall i koden.
 | `structureTimeframe` | `1h` | Tidsramme for swings og fib |
 | `minSwingPct` | 15 % | Minste bevegelse som teller som bein |
 | `minSwingDurationMs` | 30 000 | Minste varighet på et bein |
-| `minSwingVolume` | 10 000 USD | Minste volum i et bein |
+| `minSwingVolumeQuote` | 3 (quote-token) | Minste volum i et bein. Specens 10 000 USD uttrykt i WETH; må stilles om per quote-token. USD krever prisorakelet i plan 3. |
 | `fibEntry` | 0.886 | Bunn av entry-sonen |
 | `fibZoneTop` | 0.786 | Topp av entry-sonen, dårligste fyll |
 | `tpPct` | 60 % | Take profit |
 | `slBufferPct` | 2 % | Under swingbunnen |
 | `minRR` | 3.0 | Minste akseptable RR |
 | `maxSetupAgeBars` | 48 | Levetid for oppsett og armering |
-| `minTradeSizeQuote` | 50 (quote-token) | Handler under dette ignoreres i bars og som trigger. USD-konvertering innføres med prisorakelet i plan 3. |
+| `minTradeSizeQuote` | 0.015 (quote-token) | Handler under dette ignoreres i bars og som trigger. Specens 50 USD uttrykt i WETH; må stilles om per quote-token. Målt: terskelen `50` i quote-token slapp gjennom 0 av 807 ekte handler. USD-konvertering innføres med prisorakelet i plan 3. |
 
 ### Risiko
 
