@@ -45,11 +45,24 @@ før det finnes noe som armerer.
 
 ## Kjente grenser i plan 1
 
-Ikke pek boten på kjedens travleste pools ennå. Observatøren re-aggregerer
-handelsvinduet for hver innkommende handel, og på en pool med over én swap per
-blokk blir det for dyrt før plan 2 innfører inkrementell bar-vedlikehold.
-Backfillen ved oppstart henter dessuten ett blokk-tidsstempel per unike blokk,
-sekvensielt, så oppstartstiden vokser med poolens aktivitet.
+**Ikke pek boten på en stablecoin-priset pool.** Terskelene
+`minTradeSizeQuote` og `minSwingVolumeQuote` er denominert i poolens
+quote-token, og standardverdiene `0.015` og `3` er satt for WETH. På en
+USDC-priset pool betyr `0.015` halvannen cent, og størrelsesfilteret slutter i
+praksis å bite — da holder en støvhandel til å ødelegge et gyldig oppsett og
+sende deg et falskt varsel. Per-pool-terskler og et USD-orakel hører til plan 3;
+inntil da må verdiene settes for hånd per quote-token.
+
+Loggen ved oppstart oppgir `passert` og `filtrertBort`. Er `filtrertBort` null
+over tusenvis av handler, biter ikke terskelen på den poolen.
+
+Oppstartstiden vokser med poolens aktivitet: backfillen henter ett
+blokk-tidsstempel per unike blokk, sekvensielt, og det utgjør rundt 99 % av
+tiden. Batching hører til plan 2.
+
+Selve handelsbehandlingen er derimot bundet — bars vedlikeholdes inkrementelt,
+så kostnaden per handel er flat (~50 µs) uansett hvor travel poolen er, og
+minnet er 25 bars.
 
 ## Sikkerhet
 
