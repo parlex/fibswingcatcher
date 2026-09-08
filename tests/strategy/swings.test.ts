@@ -86,7 +86,11 @@ describe('detectSwings', () => {
     reset()
     const bars = [bar(100, 105), bar(90, 95), bar(95, 130), bar(125, 200)]
     const swings = detectSwings(bars, OPTS)
+    // Bar 4 utvider candidateHigh til 200 (highTs flytter seg til 4*H), men
+    // legConfirmedAtTs ble satt én gang ved bunnbekreftelsen på bar 3 og
+    // rører seg ikke — de to feltene divergerer bevisst i denne fixturen.
     expect(swings[0]!.confirmedAtTs).toBe(3 * H)
+    expect(swings[0]!.highTs).toBe(4 * H)
   })
 
   it('nullstiller volumeSinceLow når kandidatbunnen flytter seg videre ned', () => {
