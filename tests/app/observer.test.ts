@@ -644,8 +644,9 @@ describe('Observer', () => {
   })
 
   it('ugyldiggjør fortsatt når barlukkingen selv bekreftes av spotprisen', async () => {
-    // Kontrollen: uten denne beviser testen over bare at ugyldiggjøring er
-    // skrudd av, ikke at den er blitt selektiv.
+    // Kontrollen: at spot-sjekken er tatt av denne stien betyr ikke at
+    // ugyldiggjøring er skrudd av. Denne viser at et brudd med spot enig
+    // fortsatt dreper oppsettet.
     const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '100' })
     await feedImpulse(obs)
 

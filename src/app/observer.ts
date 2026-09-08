@@ -25,11 +25,13 @@ export type ObserverDeps = {
   /**
    * Poolens pris lest uavhengig av eventen, typisk fra `slot0`.
    *
-   * Spec 6.7 mottiltak 2. Leses bare ved *tilstandsendrende* evalueringer —
-   * en sone-berøring på vei til TRIGGERED, eller et brudd på vei til
-   * INVALIDATED — altså ett RPC-kall på et sjeldent øyeblikk. Ikke ved
-   * milepælsvarsler. Utelatt betyr «ingen uavhengig kontroll», som er riktig
-   * for tester og for en backtest uten kjede.
+   * Spec 6.7 mottiltak 2. Leses bare ved overganger som er avgjort på
+   * *ticken* — en sone-berøring på vei til TRIGGERED, eller en RR-avvisning —
+   * altså ett RPC-kall på et sjeldent øyeblikk. Ikke ved milepælsvarsler, og
+   * ikke ved ugyldiggjøring: den er avgjort på en barlukking, som er et
+   * historisk faktum ingen nåtidslesning kan bekrefte. Utelatt betyr «ingen
+   * uavhengig kontroll», som er riktig for tester og for en backtest uten
+   * kjede.
    */
   spotPrice?: () => Promise<string>
 }
@@ -336,6 +338,10 @@ export class Observer {
   private async evaluateAll(price: number, nowTs: number, replay: boolean): Promise<void> {
     const { strategy } = this.deps.config
 
+    // Løkkeinvariant, og `closedBars()` kopierer nå barene, så per-oppsett
+    // ville hvert oppsett betalt for 25 nye objekter.
+    const lastClose = this.lastClosedBarClose()
+
     for (const setup of this.deps.setups.activeForPool(this.deps.pool.address)) {
       const tr = evaluateSetup(setup, {
         price, nowTs,
@@ -343,7 +349,7 @@ export class Observer {
         maxSetupAgeBars: strategy.maxSetupAgeBars,
         minRR: strategy.minRR,
         tpPct: strategy.tpPct,
-        lastClosedBarClose: this.lastClosedBarClose(),
+        lastClosedBarClose: lastClose,
       })
 
       for (const level of tr.newAlerts) {

@@ -53,8 +53,9 @@ praksis å bite — da holder en støvhandel til å ødelegge et gyldig oppsett 
 sende deg et falskt varsel. Per-pool-terskler og et USD-orakel hører til plan 3;
 inntil da må verdiene settes for hånd per quote-token.
 
-Loggen ved oppstart oppgir `passert` og `filtrertBort`. Er `filtrertBort` null
-over tusenvis av handler, biter ikke terskelen på den poolen.
+Loggen ved oppstart oppgir `passert`, `filtrertBort` og `forkastetGamle`. Er
+`filtrertBort` null over tusenvis av handler, biter ikke terskelen på den
+poolen.
 
 **Barlukkingen er ubeskyttet av spec 6.7 mottiltak 2.** Det uavhengige
 prisoppslaget validerer at en pris *nå* stemmer med poolen *nå*, så det kan
@@ -74,11 +75,11 @@ Selve handelsbehandlingen er bundet i poolens aktivitet: bars vedlikeholdes
 inkrementelt, så bar-byggingen koster 0,09 µs per handel uansett om vinduet
 holder tusen eller en million handler, og minnet er 25 bars.
 
-Kostnaden vokser derimot **lineært med antall aktive oppsett**, fordi
-`evaluateAll` gjør én SQLite-spørring per handel: målt rundt 9 µs uten oppsett
-og rundt 149 µs med 64. Sanntidsbudsjettet ved 13 swaps/s er 76 923 µs per
-handel, så det er tre størrelsesordener klaring — men det er den aksen som
-vokser, ikke pool-aktiviteten.
+Kostnaden vokser derimot **lineært med antall aktive oppsett**: spørringen mot
+basen er ett kall per handel uansett, men radene som kommer tilbake evalueres
+én for én. Målt rundt 9 µs uten oppsett og rundt 149 µs med 64.
+Sanntidsbudsjettet ved 13 swaps/s er 76 923 µs per handel, så det er over 500
+gangers klaring — men det er den aksen som vokser, ikke pool-aktiviteten.
 
 ## Sikkerhet
 

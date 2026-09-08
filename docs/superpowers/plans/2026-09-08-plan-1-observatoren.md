@@ -230,6 +230,9 @@ export const DataSchema = z.object({
   chainId: z.literal(4663),
   maxDataStalenessMs: z.number().int().positive(),
   backfillBlockRange: z.number().int().positive(),
+  // Minst fire bars: under det har svingdeteksjonen ikke nok å jobbe med, og
+  // den dør lydløst i stedet for å feile.
+  backfillLookbackBars: z.number().int().min(4),
   reorgDepthBlocks: z.number().int().nonnegative(),
 }).strict()
 
@@ -258,7 +261,11 @@ export const DEFAULT_CONFIG: Config = {
   data: {
     chainId: 4663,
     maxDataStalenessMs: 10_000,
-    backfillBlockRange: 10_000,
+    // Målt: getLogs er begrenset på KALLANTALL, ikke vindusstørrelse — men
+    // har et eget tak på 10 000 resultater, som vindusstørrelsen halverer seg
+    // ned under.
+    backfillBlockRange: 500_000,
+    backfillLookbackBars: 24,
     reorgDepthBlocks: 20,
   },
 }
