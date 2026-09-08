@@ -1,0 +1,25 @@
+node_modules/
+dist/
+build/
+coverage/
+
+# Hemmeligheter — MÅ aldri committes
+.env
+.env.*
+!.env.example
+*.keystore
+keystore/
+secrets/
+
+# Lokal tilstand
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+
+.DS_Store
+.idea/
+.vscode/
