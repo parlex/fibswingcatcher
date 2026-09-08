@@ -60,9 +60,15 @@ Oppstartstiden vokser med poolens aktivitet: backfillen henter ett
 blokk-tidsstempel per unike blokk, sekvensielt, og det utgjør rundt 99 % av
 tiden. Batching hører til plan 2.
 
-Selve handelsbehandlingen er derimot bundet — bars vedlikeholdes inkrementelt,
-så kostnaden per handel er flat (~50 µs) uansett hvor travel poolen er, og
-minnet er 25 bars.
+Selve handelsbehandlingen er bundet i poolens aktivitet: bars vedlikeholdes
+inkrementelt, så bar-byggingen koster 0,09 µs per handel uansett om vinduet
+holder tusen eller en million handler, og minnet er 25 bars.
+
+Kostnaden vokser derimot **lineært med antall aktive oppsett**, fordi
+`evaluateAll` gjør én SQLite-spørring per handel: målt rundt 9 µs uten oppsett
+og rundt 149 µs med 64. Sanntidsbudsjettet ved 13 swaps/s er 76 923 µs per
+handel, så det er tre størrelsesordener klaring — men det er den aksen som
+vokser, ikke pool-aktiviteten.
 
 ## Sikkerhet
 

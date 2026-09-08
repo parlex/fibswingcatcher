@@ -141,25 +141,77 @@ describe('IncrementalBars er ekvivalent med aggregate', () => {
    * bars for enhver handelssekvens — inkludert uordnet levering, like
    * tidsstempler og handler under terskelen.
    */
-  for (const seed of [1, 7, 42, 1337, 90210, 271828]) {
-    it(`gir identiske bars som aggregate for tilfeldig sekvens (seed ${seed})`, () => {
-      const r = rng(seed)
-      const trades: Trade[] = []
-      let ts = H
-      for (let i = 0; i < 400; i++) {
-        ts += Math.floor(r() * (H / 3))
-        // Hver tiende handel leveres ut av rekkefølge, opptil to bars bakover.
-        const jitter = r() < 0.1 ? -Math.floor(r() * 2 * H) : 0
-        const price = (0.5 + r() * 200).toPrecision(9)
-        const size = r() < 0.15 ? 5n : ONE   // ~15 % under terskelen
-        trades.push(t(Math.max(H, ts + jitter), price, size))
-      }
+  /**
+   * Generatoren lager kollisjoner med vilje.
+   *
+   * Første utgave av denne testen hadde null like tidsstempler over 2 400
+   * handler: steget var alltid positivt og `logIndex` kom fra en global
+   * teller. Dermed hvilte `>=`/`<`-asymmetrien i `fold` — den subtileste
+   * delen av filen — på to håndskrevne tilfeller. Nå står steget ofte stille,
+   * og `logIndex` trekkes fra et lite sett, så både like `ts` og like
+   * `(ts, logIndex)` forekommer. En sent levert handel bærer da rutinemessig
+   * en *lavere* logIndex enn en alt sett handel på samme `ts`, som er
+   * korrelasjonen ekte per-blokk-indekser har.
+   */
+  function fuzzTrades(seed: number): Trade[] {
+    const r = rng(seed)
+    const trades: Trade[] = []
+    let ts = H
+    for (let i = 0; i < 400; i++) {
+      // Hvert tiende steg står stille, så tidsstempler kolliderer.
+      ts += r() < 0.1 ? 0 : Math.floor(r() * (H / 3))
+      // Hver tiende handel leveres ut av rekkefølge, opptil to bars bakover.
+      const jitter = r() < 0.1 ? -Math.floor(r() * 2 * H) : 0
+      const price = (0.5 + r() * 200).toPrecision(9)
+      const size = r() < 0.15 ? 5n : ONE   // ~15 % under terskelen
+      trades.push(t(Math.max(H, ts + jitter), price, size, Math.floor(r() * 4)))
+    }
+    return trades
+  }
 
+  const SEEDS = [1, 7, 42, 1337, 90210, 271828]
+
+  it('generatoren lager faktisk kollisjoner — ellers tester fuzzingen ingenting', () => {
+    let sameTs = 0
+    let sameKey = 0
+    for (const seed of SEEDS) {
+      const tr = fuzzTrades(seed)
+      const byTs = new Map<number, number[]>()
+      for (const x of tr) {
+        const at = byTs.get(x.ts) ?? []
+        if (at.length > 0) sameTs += 1
+        if (at.includes(x.logIndex)) sameKey += 1
+        at.push(x.logIndex)
+        byTs.set(x.ts, at)
+      }
+    }
+    expect(sameTs).toBeGreaterThan(50)
+    expect(sameKey).toBeGreaterThan(10)
+  })
+
+  for (const seed of SEEDS) {
+    it(`gir identiske bars som aggregate for tilfeldig sekvens (seed ${seed})`, () => {
+      const trades = fuzzTrades(seed)
       const minSize = 10n
-      const expected = aggregate(trades, H, minSize)
-      const actual = build(trades, minSize).bars()
+      expect(build(trades, minSize).bars()).toEqual(aggregate(trades, H, minSize))
+    })
+
+    it(`er identisk med aggregate også med et endelig vindu (seed ${seed})`, () => {
+      // Pruning var ikke med i fuzzingen i det hele tatt — bare to
+      // håndskrevne tilfeller. Kanten er monotont stigende, så inkrementell
+      // klipping skal gi samme resultat som å filtrere handlene én gang på
+      // den endelige kanten.
+      const trades = fuzzTrades(seed)
+      const minSize = 10n
+      const windowMs = 8 * H
+      const newest = Math.max(...trades.filter((x) => x.sizeQuote >= minSize).map((x) => x.ts))
+      const cutoff = Math.floor((newest - windowMs) / H) * H
+
+      const actual = build(trades, minSize, windowMs).bars()
+      const expected = aggregate(trades.filter((x) => x.ts >= cutoff), H, minSize)
 
       expect(actual).toEqual(expected)
+      expect(actual.length).toBeLessThan(12)   // vinduet biter faktisk
     })
   }
 

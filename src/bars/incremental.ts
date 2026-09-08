@@ -25,18 +25,29 @@ const gt = (a: string, b: string): boolean => Number(a) > Number(b)
  *
  * `aggregate` sorterer og bøtter hele handelsarrayen om igjen for hver
  * innkommende handel. Kostnaden vokser dermed med poolens aktivitet: på
- * kjedens travleste pool holder et 24-timers vindu rundt 1,1 millioner
- * handler, og per-handel-kostnaden ble målt til 223 µs mot et sanntidsbudsjett
- * på 77 µs — prosessen faller irreversibelt bak i løpet av et døgn.
+ * kjedens travleste pool holder et 24-bars vindu rundt 1,1 millioner handler,
+ * og per-handel-kostnaden ble målt til 223 004 µs. Sanntidsbudsjettet ved
+ * 13 swaps/s er 76 923 µs, så prosessen faller irreversibelt bak i løpet av et
+ * døgn. Etter endringen: 0,09 µs i denne modulen, flatt uansett vindusstørrelse.
  *
  * Innsikten som gjør dette mulig er at rå handler ikke trengs i det hele tatt:
  * `detectSwings` tar bars, og `evaluateSetup` tar en pris. Så vi holder bare
  * barene, og hver handel oppdaterer sin bøtte direkte. Minnet blir O(bars i
- * vinduet) — 24 objekter — i stedet for O(handler i vinduet).
+ * vinduet) — 25 objekter, siden kanten justeres ned til en barstart — i stedet
+ * for O(handler i vinduet).
  *
  * Ekvivalensen med `aggregate` er ikke en antagelse: `tests/bars/incremental.test.ts`
  * krever bit-identiske bars for tilfeldige sekvenser med uordnet levering,
- * like tidsstempler og handler under terskelen.
+ * kolliderende `(ts, logIndex)` og handler under terskelen, både med og uten
+ * klipping.
+ *
+ * Én forutsetning er verdt å skrive ned, for den er ikke håndhevet:
+ * ekvivalensen hviler på at prisstrenger er *kanoniske*. `aggregate` går
+ * gjennom handlene i sortert rekkefølge og denne i ankomstrekkefølge, og `gt`
+ * sammenligner tall mens strengen beholdes — så to numerisk like men tekstulike
+ * priser ('100' og '100.0') i samme bøtte gir ulik streng. `priceFromSqrtX96`
+ * er den eneste kilden til `priceQuote` i treet og gir én representasjon per
+ * verdi, så tilfellet er uoppnåelig i dag.
  */
 export class IncrementalBars {
   private slots: Slot[] = []
@@ -60,9 +71,15 @@ export class IncrementalBars {
     this.prune()
   }
 
-  /** Barene i vinduet, kronologisk. */
+  /**
+   * Barene i vinduet, kronologisk.
+   *
+   * Kopier, ikke referanser: `fold` muterer barene på plass, så en konsument
+   * som holdt på en `Bar` ville sett den endre seg under seg. Gratis ved 25
+   * bars, og det fjerner en felle for neste leser.
+   */
   bars(): Bar[] {
-    return this.slots.map((s) => s.bar)
+    return this.slots.map((s) => ({ ...s.bar }))
   }
 
   /** Antall beholdte bars — det er dette som er bundet, ikke antall handler. */

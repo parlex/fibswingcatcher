@@ -72,6 +72,7 @@ export class Observer {
   private barsStore: IncrementalBars
   private acceptedCount = 0
   private filteredCount = 0
+  private droppedOldCount = 0
   private lastBarTs = -1
   private newestTs = Number.NEGATIVE_INFINITY
   private intervalMs: number
@@ -120,6 +121,18 @@ export class Observer {
     return this.filteredCount
   }
 
+  /**
+   * Handler forkastet som eldre enn strukturvinduet.
+   *
+   * Egen teller fordi denne stien er bærende: en gammel pris som nådde
+   * `evaluateAll` ville ugyldiggjort et fullgodt oppsett. Uten telleren er en
+   * stille forkastet backfill-hale usynlig, og `passert + filtrertBort` ville
+   * ikke summert til antall handler sett.
+   */
+  get droppedOld(): number {
+    return this.droppedOldCount
+  }
+
   /** En handel fra den levende strømmen. Begge klokkene går. */
   async onTrade(trade: Trade): Promise<void> {
     await this.ingest(trade, false)
@@ -153,7 +166,10 @@ export class Observer {
     // nedenfor ville fjernet den igjen umiddelbart — men ikke før
     // `evaluateAll` hadde målt den gamle prisen mot alle aktive oppsett, og en
     // eldgammel pris under swing low ugyldiggjør et fullgodt oppsett.
-    if (trade.ts < this.cutoffTs()) return
+    if (trade.ts < this.cutoffTs()) {
+      this.droppedOldCount += 1
+      return
+    }
 
     if (trade.ts > this.newestTs) this.newestTs = trade.ts
     this.acceptedCount += 1
@@ -193,7 +209,7 @@ export class Observer {
   }
 
   /**
-   * Bare de *lukkede* barene. Den siste baren i `this.bars` inneholder
+   * Bare de *lukkede* barene. Den siste baren fra `barsStore` inneholder
    * handelen som nettopp kom inn og er per definisjon ufullstendig.
    *
    * Dette er strukturklokken slik spec 2.1 beskriver den. Uten kuttet kjørte
@@ -355,19 +371,21 @@ export class Observer {
       if (replay && !STRUCTURAL_TERMINAL.has(tr.state)) continue
 
       // Spec 6.7 mottiltak 2: en tilstandsendring er verdt ett uavhengig
-      // prisoppslag. Milepæler er det ikke.
+      // prisoppslag — men bare når prisen beslutningen er tatt på er *nå*.
       //
-      // Valider den prisen som faktisk DREV overgangen. Ugyldiggjøring drives
-      // av barlukkingen (spec 2.4), sone og RR av ticken. Å validere ticken på
-      // ugyldiggjøringsstien lot en angriper være ærlig på ticken og manipulere
-      // barens siste handel — spot-sjekken bekreftet da en pris beslutningen
-      // ikke var tatt på.
-      // Utløp er aldersdrevet og har ingen pris å validere. Å sende det
-      // gjennom sjekken lot en sprikende spot blokkere utløpet, så gamle
-      // oppsett hopet seg opp og kunne aldri dø.
-      const decisive = tr.state === 'INVALIDATED' ? this.lastClosedBarClose() ?? price : price
-      const priceDriven = tr.state !== 'EXPIRED'
-      if (!replay && priceDriven && !(await this.priceLooksReal(decisive, setup.id))) continue
+      // Trigger og RR-avvisning drives av ticken, og spot leses i samme
+      // øyeblikk, så de to måler samme størrelse. Ugyldiggjøring drives av en
+      // barlukking (spec 2.4), som er et historisk faktum: ingen nåtidslesning
+      // kan bekrefte den. Å måle den mot spot avviste ekte brudd — et oppsett
+      // hvis bein var brutt overlevde og sendte senere et `zone`-varsel — og
+      // gjorde oppsett udødelige, siden ugyldiggjøring sjekkes før alder og en
+      // avvisning derfor maskerte utløpet. Utløp har ingen pris i det hele tatt.
+      //
+      // Barlukkingen er dermed ubeskyttet av dette mottiltaket. Størrelses-
+      // filteret er det som står imot der, og det stopper ikke en manipulasjon
+      // i quote-token-skala. Se «Kjente grenser» i README.
+      const tickDriven = tr.state === 'TRIGGERED' || tr.state === 'REJECTED'
+      if (!replay && tickDriven && !(await this.priceLooksReal(price, setup.id))) continue
 
       this.deps.setups.upsert({ ...this.deps.setups.get(setup.id)!, state: tr.state })
 

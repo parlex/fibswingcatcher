@@ -317,6 +317,7 @@ describe('Observer', () => {
     await obs.onTrade(trade(50 * H, 10))
 
     expect(obs.accepted).toBe(acceptedBefore)
+    expect(obs.droppedOld).toBe(1)
     expect(setups.allActive()).toEqual(setupsBefore)
     expect(notifier.sent).toEqual([])
   })
@@ -336,8 +337,10 @@ describe('Observer', () => {
       await unbounded.obs.onTrade(t)
     }
 
-    // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort
+    // Sekvensen er 13 bars; ingenting skal ha blitt klippet bort. `accepted`
+    // vitner om inngangsguarden, `retainedBars` om klippingen — begge trengs.
     expect(bounded.obs.accepted).toBe(seq.length)
+    expect(bounded.obs.retainedBars).toBe(13)
     expect(bounded.setups.allActive()).toEqual(unbounded.setups.allActive())
     expect(bounded.notifier.sent).toEqual(unbounded.notifier.sent)
     expect(bounded.notifier.sent.length).toBeGreaterThan(0)
@@ -585,36 +588,59 @@ describe('Observer', () => {
     await obs.onTrade(trade(AFTER, 125))
 
     expect(setups.allActive()[0]!.state).toBe('TRIGGERED')   // feiler fortsatt åpent
-    expect(logs.warn.length).toBeGreaterThan(0)              // men ikke i stillhet
+    expect(logs.warn).toContainEqual(
+      expect.objectContaining({ spot: 0 }),                  // men ikke i stillhet
+    )
   })
 
-  it('spot-sjekken validerer barlukkingen ugyldiggjøringen handler på, ikke ticken', async () => {
-    // Angrepet: manipuler barens SISTE handel ned under swing low, og la
-    // neste bars første handel være ærlig. Ugyldiggjøringen drives av
-    // `lastClosedBarClose` (1), men spot-sjekken fikk `price` (140) — som
-    // stemmer med spot, så mottiltaket slapp angrepet gjennom.
+  it('logger også når spotoppslaget gir noe som ikke er et tall', async () => {
+    const { obs, logs } = observer({}, {}, { spotPrice: async () => 'abc' })
+    await feedImpulse(obs)
+    await obs.onTrade(trade(AFTER, 125))
+    expect(logs.warn).toContainEqual(expect.objectContaining({ spot: NaN }))
+  })
+
+  it('et ekte strukturbrudd ugyldiggjør selv når prisen har hentet seg inn igjen', async () => {
+    // Spot-sjekken hører ikke på denne stien. Den validerer at en pris *nå*
+    // stemmer med poolen *nå*; en barlukking er et historisk faktum, og ingen
+    // nåtidslesning kan bekrefte den. Da barlukkingen ble sendt inn i
+    // toleransesjekken, ble et ekte brudd avvist fordi prisen hadde hentet seg
+    // inn — og oppsettet sendte senere et `zone`-varsel på et brutt bein.
     const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '140' })
     await feedImpulse(obs)
 
-    await feedBar(obs, 13, [140, 1])       // bar 13 lukker på 1, godt under swing low 110
-    await obs.onTrade(trade(14 * H, 140))  // ærlig tick åpner bar 14
+    await feedBar(obs, 13, [130, 105])     // lukker på 105, under swing low 110
+    await obs.onTrade(trade(14 * H, 140))  // prisen er tilbake på 140
 
+    expect(setups.allActive()).toHaveLength(0)
+    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(true)
+  })
+
+  it('en avvist overgang kan ikke gjøre et oppsett udødelig', async () => {
+    // Ugyldiggjøring sjekkes før alder, så en avvisning der maskerte utløpet.
+    const { obs, setups } = observer({}, {}, { spotPrice: async () => '1' })
+    await feedImpulse(obs)
     expect(setups.allActive()).toHaveLength(1)
-    expect(setups.allActive()[0]!.state).toBe('DETECTED')
-    expect(notifier.sent.some((a) => a.kind === 'invalidated')).toBe(false)
+
+    // Hver bar lukker under swing low (110), så ugyldiggjøring forsøkes hver
+    // gang — og med spot på 1 ville den blitt avvist hver gang.
+    for (let b = 14; b <= 70; b++) await obs.onTrade(trade(b * H, 105 - (b - 14)))
+    expect(setups.allActive()).toHaveLength(0)
   })
 
   it('utløper selv om spotprisen spriker — utløp er aldersdrevet, ikke prisdrevet', async () => {
     // En sprikende spot skal ikke kunne holde et gammelt oppsett i live.
     // Uten dette blokkerer en angriper som styrer spriket alle utløp, og
     // aktive oppsett hoper seg opp for alltid.
-    const { obs, setups } = observer({}, {}, { spotPrice: async () => '1' })
+    const { obs, setups, notifier } = observer({}, {}, { spotPrice: async () => '1' })
     await feedImpulse(obs)
     expect(setups.allActive()).toHaveLength(1)
 
     await obs.onTrade(trade(61 * H, 140))   // godt forbi maxSetupAgeBars (48)
 
     expect(setups.allActive()).toHaveLength(0)
+    // Entydig: det var utløp, ikke ugyldiggjøring, som avsluttet oppsettet.
+    expect(notifier.sent.some((a) => a.kind === 'expired')).toBe(true)
   })
 
   it('ugyldiggjør fortsatt når barlukkingen selv bekreftes av spotprisen', async () => {

@@ -204,6 +204,10 @@ import { z } from 'zod'
 
 const pct = z.number().positive().max(100)
 
+// Beløp i poolens quote-token, som desimaltall. Skaleres til rå kjede-enheter
+// med tokenets desimaler før sammenligning — se `toBaseUnits`.
+const quoteAmount = z.string().regex(/^\d+(\.\d+)?$/)
+
 export const StrategySchema = z.object({
   structureTimeframe: z.enum(['5m', '15m', '1h', '4h']),
   minSwingPct: pct,
@@ -215,7 +219,7 @@ export const StrategySchema = z.object({
   slBufferPct: pct,
   minRR: z.number().positive(),
   maxSetupAgeBars: z.number().int().positive(),
-  minTradeSizeQuote: z.string(),
+  minTradeSizeQuote: quoteAmount,
   alertLevels: z.array(z.number().gt(0).lt(1)).nonempty(),
 }).strict().refine((s) => s.fibZoneTop < s.fibEntry, {
   message: 'fibZoneTop må være grunnere enn fibEntry',
