@@ -56,6 +56,16 @@ inntil da må verdiene settes for hånd per quote-token.
 Loggen ved oppstart oppgir `passert` og `filtrertBort`. Er `filtrertBort` null
 over tusenvis av handler, biter ikke terskelen på den poolen.
 
+**Barlukkingen er ubeskyttet av spec 6.7 mottiltak 2.** Det uavhengige
+prisoppslaget validerer at en pris *nå* stemmer med poolen *nå*, så det kan
+brukes på trigger og RR-avvisning, som begge drives av ticken. Ugyldiggjøring
+drives av en barlukking — et historisk faktum ingen nåtidslesning kan bekrefte.
+Det som står imot der er størrelsesfilteret alene, og det stopper ikke en
+manipulasjon i quote-token-skala: en swap på titalls dollar som barens siste
+handel kan ta ut swing low og drepe et gyldig oppsett. Å lukke det ordentlig er
+en strategibeslutning — kreve at bruddet vedvarer, eller kreve volum i
+bruddbaren — og hører i en designrunde, ikke i en punktfiks.
+
 Oppstartstiden vokser med poolens aktivitet: backfillen henter ett
 blokk-tidsstempel per unike blokk, sekvensielt, og det utgjør rundt 99 % av
 tiden. Batching hører til plan 2.
