@@ -325,6 +325,24 @@ describe('Observer', () => {
       .toEqual([])
   })
 
+  it('en annen pools stale-strøm disarmerer ikke dette oppsettet', async () => {
+    const shared = observer()
+    const poolB: PoolMeta = { ...pool, address: '0x2222222222222222222222222222222222222222' }
+    const obsB = new Observer({
+      pool: poolB, label: 'ANNEN/WETH', config: shared.config,
+      setups: shared.setups, notifier: shared.notifier,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+
+    await feedImpulse(shared.obs)
+    const s = shared.setups.allActive()[0]!
+    shared.setups.upsert({ ...s, state: 'ARMED' })
+
+    await obsB.onStale(45_000)
+
+    expect(shared.setups.get(s.id)!.state).toBe('ARMED')
+  })
+
   it('disarmerer et ARMED oppsett når strømmen blir stale', async () => {
     const { obs, setups, notifier } = observer()
     await feedImpulse(obs)
