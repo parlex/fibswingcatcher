@@ -16,6 +16,7 @@ export type LiveDeps = {
   clearTimer(t: unknown): void
   maxStalenessMs: number
   meta: PoolMeta
+  reorgDepthBlocks: number
   blockTs(bn: bigint): Promise<number>
 }
 
@@ -31,7 +32,8 @@ export class LiveStream {
   private stale = false
   private lastEventAt = 0
   private backoff = RECONNECT_MS
-  private seen = new Set<string>()
+  private seen = new Map<string, bigint>()
+  private generation = 0
 
   constructor(private deps: LiveDeps) {}
 
@@ -40,7 +42,9 @@ export class LiveStream {
   }
 
   start(): void {
+    if (this.running) return
     this.running = true
+    this.stale = false
     this.lastEventAt = this.deps.now()
     this.connect()
     this.armStaleTimer()
@@ -54,6 +58,7 @@ export class LiveStream {
     this.staleTimer = undefined
     if (this.reconnectTimer !== undefined) this.deps.clearTimer(this.reconnectTimer)
     this.reconnectTimer = undefined
+    this.seen.clear()
   }
 
   private emit(e: StreamEvent): void {
@@ -62,12 +67,18 @@ export class LiveStream {
 
   private connect(): void {
     if (!this.running) return
+    const gen = ++this.generation
     this.unsubscribe = this.deps.subscribe(
-      (log) => { void this.handleLog(log) },
+      (log) => {
+        if (gen !== this.generation) return // spøkelse fra en forlatt sokkel
+        void this.handleLog(log)
+      },
       () => {
+        if (gen !== this.generation) return // spøkelse fra en forlatt sokkel
         this.unsubscribe?.()
         this.unsubscribe = undefined
         if (!this.running) return
+        if (this.reconnectTimer !== undefined) return // reconnect allerede planlagt — ignorer duplikatfeilen
         this.reconnectTimer = this.deps.setTimer(() => {
           this.reconnectTimer = undefined
           this.connect()
@@ -89,16 +100,29 @@ export class LiveStream {
     }, this.deps.maxStalenessMs)
   }
 
+  /** Fjerner dedupe-nøkler eldre enn reorg-vinduet, slik at `seen` ikke vokser ubegrenset. */
+  private evictOldSeen(latestBlock: bigint): void {
+    const cutoff = latestBlock - BigInt(this.deps.reorgDepthBlocks)
+    for (const [key, blockNumber] of this.seen) {
+      if (blockNumber < cutoff) this.seen.delete(key)
+    }
+  }
+
   private async handleLog(log: BlockLog): Promise<void> {
+    if (!this.running) return // sent levert etter stop() — ignorer
+
     const key = `${log.transactionHash}-${log.logIndex}`
     if (this.seen.has(key)) return
-    this.seen.add(key)
+    this.seen.set(key, log.blockNumber)
+    this.evictOldSeen(log.blockNumber)
 
     this.lastEventAt = this.deps.now()
     this.backoff = RECONNECT_MS
     if (this.stale) { this.stale = false; this.emit({ kind: 'healthy' }) }
 
     const ts = await this.deps.blockTs(log.blockNumber)
+    if (!this.running) return // stoppet mens blockTs var i flukt — ikke send en handel etter avslutning
+
     this.emit({ kind: 'trade', trade: decodeSwapLog(log, this.deps.meta, ts) })
   }
 }
